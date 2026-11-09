@@ -11,6 +11,7 @@ if ! id blink-proxy >/dev/null 2>&1; then
   useradd --system --home-dir /var/lib/blink-proxy --shell /usr/sbin/nologin --user-group blink-proxy
 fi
 install -d -m 0755 -o root -g root /usr/local/libexec/blink-proxy
+install -d -m 0755 -o root -g root /usr/local/libexec/blink-proxy/bin
 install -d -m 0750 -o root -g blink-proxy /var/lib/blink-proxy
 install -d -m 0700 -o root -g root /var/lib/blink-proxy/manager
 install -d -m 0700 -o blink-proxy -g blink-proxy /var/lib/blink-proxy/caddy

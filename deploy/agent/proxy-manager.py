@@ -106,10 +106,19 @@ def run(args, timeout=30, optional=False, input_data=None, as_proxy=False):
         if result.returncode and not optional:
             raise DeploymentError('命令执行失败：' + Path(args[0]).name + ' ' + str(args[1] if len(args) > 1 else ''))
         return result.stdout.decode(errors='replace')[:1024 * 1024] if result.returncode == 0 else ''
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
         if optional:
             return ''
-        raise DeploymentError('命令不可用或超时：' + Path(args[0]).name) from None
+        raise DeploymentError('命令执行超时（' + str(timeout) + ' 秒）：' + Path(args[0]).name) from None
+    except OSError as error:
+        if optional:
+            return ''
+        name = Path(args[0]).name
+        if isinstance(error, PermissionError):
+            raise DeploymentError('执行权限不足：' + name + '（请检查程序及上级目录权限）') from None
+        if isinstance(error, FileNotFoundError):
+            raise DeploymentError('命令不存在：' + name) from None
+        raise DeploymentError('命令无法启动：' + name + '（errno=' + str(error.errno) + '）') from None
 
 
 def service_name(instance):
@@ -322,6 +331,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def install_binary(engine):
+    # The manager uses UMask=0077, while cores run as blink-proxy. Repair cached
+    # installations too: a 0755 executable is unusable below a root-only directory.
+    BIN.mkdir(parents=True, exist_ok=True)
+    os.chmod(BIN, 0o755)
     manifest = read_json(MANIFEST)
     arch = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(platform.machine())
     require(arch is not None, '仅支持 Linux AMD64 / ARM64')

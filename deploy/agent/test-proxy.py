@@ -34,6 +34,22 @@ def fixture():
 
 
 class ProxyTests(unittest.TestCase):
+    def test_execution_failures_are_distinct_and_do_not_expose_arguments(self):
+        args = ['/private/xray-test', '--secret', 'must-not-be-exposed']
+        for error, message in [
+            (PermissionError(13, 'denied', args[-1]), '执行权限不足'),
+            (FileNotFoundError(2, 'missing', args[-1]), '命令不存在'),
+            (OSError(8, 'invalid format', args[-1]), 'errno=8'),
+            (subprocess.TimeoutExpired(args, 7, output=args[-1]), '命令执行超时（7 秒）'),
+        ]:
+            with self.subTest(error=type(error).__name__), patch.object(m.subprocess, 'run', side_effect=error):
+                with self.assertRaises(m.DeploymentError) as caught:
+                    m.run(args, timeout=7)
+                self.assertIn(message, str(caught.exception))
+                self.assertIn('xray-test', str(caught.exception))
+                self.assertNotIn(args[-1], str(caught.exception))
+                self.assertEqual(m.run(args, optional=True), '')
+
     def test_public_addresses_prefer_routed_stable_interfaces(self):
         interfaces = [
             {'ifname': 'eth1', 'addr_info': [{'local': '1.1.1.1', 'scope': 'global'}]},
@@ -247,6 +263,27 @@ def integration():
     try:
         manifest = json.loads(Path(__file__).with_name('proxy-assets.json').read_text())
         arch = 'arm64' if os.uname().machine == 'aarch64' else 'amd64'
+        # Reproduce the systemd manager's restrictive umask, then execute every
+        # installed core as its actual unprivileged service identity.
+        subprocess.run(['useradd', '--system', '--user-group', '--no-create-home', 'blink-proxy'], check=True)
+        work.chmod(0o755)
+        private = work / 'manager'; private.mkdir(mode=0o700)
+        (private / 'origin.json').write_text(json.dumps({'origin': 'https://master.example.test'}))
+        previous_umask = os.umask(0o077)
+        try:
+            with patch.object(m, 'BIN', work / 'installed-bin'), patch.object(m, 'PRIVATE', private), patch.object(m, 'MANIFEST', Path(__file__).with_name('proxy-assets.json')), patch.object(m.urllib.request, 'build_opener') as opener:
+                opener.return_value.open.side_effect = lambda url, timeout: (Path('/releases/downloads/proxy') / url.rsplit('/', 1)[1]).open('rb')
+                for engine in manifest:
+                    m.install_binary(engine)
+                    assert m.run([str(m.binary(engine)), 'version'], as_proxy=True)
+                    m.BIN.chmod(0o700)
+                    m.install_binary(engine)
+                    assert m.run([str(m.binary(engine)), 'version'], as_proxy=True)
+                assert opener.return_value.open.call_count == len(manifest), 'cached binaries are repaired without downloading again'
+                assert private.stat().st_mode & 0o777 == 0o700, 'private credentials remain root-only'
+        finally:
+            os.umask(previous_umask)
+        print('PASS real core installation and cached-directory repair under UMask=0077 as blink-proxy')
         bins = {}
         for engine in manifest:
             asset = manifest[engine][arch]
@@ -389,9 +426,7 @@ def integration():
             assert get(port, 'ipdirect.test').stdout == b'blink-proxy-ok'
         # Exercise apply -> failure/rollback -> uninstall with real sing-box
         # processes under the production service UID, substituting only systemd.
-        command(['useradd', '--system', '--user-group', '--no-create-home', 'blink-proxy'])
         user = m.pwd.getpwnam('blink-proxy')
-        work.chmod(0o755)
         managed = work / 'managed'; managed.mkdir(mode=0o750); os.chown(managed, 0, user.pw_gid)
         private = managed / 'manager'; private.mkdir(mode=0o700)
         units = work / 'units'; units.mkdir()
