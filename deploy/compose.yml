@@ -69,7 +69,7 @@ services:
       HOSTNAME: 0.0.0.0
       PORT: "3000"
     secrets: [database_url, encryption_key]
-    networks: [frontend, database]
+    networks: [frontend, database, egress]
     depends_on: {migrate: {condition: service_completed_successfully}}
     mem_limit: 1g
     healthcheck:

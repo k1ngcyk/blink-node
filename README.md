@@ -236,6 +236,8 @@ ICMP 依赖系统 `ping` 命令与允许的 ping socket 权限；必要时为服
 
 存量节点先更新 Agent，再从同版本、已核对 SHA256 的发布包解压 `enable-proxy.sh`、`proxy-manager.py`、`proxy-assets.json` 和 `blink-proxy-manager.service`，以 root 运行 `bash enable-proxy.sh`。无需重新注册。Agent 自动更新器只更新 Agent 二进制，部署器后续升级仍需重新执行该脚本。
 
+存量 Master 升级时同步更新 `deploy/compose.yml`，让 Web 服务接入 `egress` 网络，以访问 Cloudflare API 和解析伪装上游域名。
+
 默认仅管理已启用的 UFW；选择安装启用时会保留配置及实际监听的 SSH 端口。SS2022 仅为已关联入口的公网地址添加规则。已有管理员规则不接管；云安全组需同步配置。外部防火墙模式由管理员维护访问规则。
 
 ### 扫描、部署与恢复
