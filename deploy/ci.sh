@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shell runner (tag: build), using its existing Docker/registry credentials.
+# Build Runner (tag: build), using its existing Docker/registry credentials.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
@@ -49,6 +49,7 @@ docker run --rm --platform "$native" --user "$(id -u):$(id -g)" -e HOME=/tmp \
 )
 bash deploy/build-agent.sh
 bash deploy/test-installer.sh
+python3 deploy/test-master-deploy.py
 docker buildx build --platform "$native" --target runtime --load \
   --build-arg "HTTP_PROXY=${BLINK_BUILD_PROXY:-${HTTP_PROXY:-}}" --build-arg "HTTPS_PROXY=${BLINK_BUILD_PROXY:-${HTTPS_PROXY:-}}" \
   -t "$candidate" web

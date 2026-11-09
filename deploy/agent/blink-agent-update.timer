@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for Blink Agent updates every 15 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=15min
+RandomizedDelaySec=2min
+AccuracySec=30s
+Unit=blink-agent-update.service
+
+[Install]
+WantedBy=timers.target

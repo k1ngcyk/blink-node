@@ -12,6 +12,7 @@
 - 持续时间、恢复阈值、静默、恢复通知；Telegram 和签名 HTTPS Webhook；失败重试与投递记录。
 - 管理员密码 + TOTP，近期高权限验证、会话撤销、接入凭证轮换与操作审计。
 - PostgreSQL 分区、分钟 / 小时聚合、有界离线缓存、重连补传与去重。
+- Agent 定时自动更新、双重 SHA256 校验、同版本构建识别、连接健康检查与失败回滚。
 
 后续代理服务实例与资源授权已预留边界；AnyTLS、Shadowsocks 2022、VLESS + REALITY 的安装管理属于后续版本。
 
@@ -72,13 +73,14 @@ TOTP 有重放保护，同一个验证码只能成功使用一次；需要再次
 ### 面板一键安装（推荐）
 
 1. 点击 **添加服务器**，填写名称和分组，生成接入凭证。
-2. 按需勾选 **启用网页终端**（仅普通 `blink-agent` 用户，默认关闭）。
+2. 按需勾选 **启用网页终端（root 用户）**（默认关闭）。启用后，Agent 服务和网页 Shell 均以 root 运行。
 3. 点击 **复制一键安装命令**，在目标服务器的 root Shell 中粘贴运行（普通用户先执行 `sudo -i`）。
 4. 等待几秒，面板将显示在线和监控数据。
 
 安装器自动识别 x86_64 / ARM64，从你的 Master 的 `/downloads/agent/v0.1.0/` 下载静态 musl 二进制，
-核对 SHA256、创建低权限用户、写入配置、消费单次凭证并启动 systemd。需要 `curl`、CA 证书和正在运行的 systemd；
-例如 Debian / Ubuntu 可先安装 `curl ca-certificates`。安装不依赖目标服务器访问 GitHub，也无需 Rust 编译环境。
+核对 SHA256、创建服务用户、写入配置、消费单次凭证并启动 systemd；启用终端时自动配置 root 服务 override，同时默认启用自动更新。
+需要 `curl`、CA 证书、Python 3.9+ 和正在运行的 systemd；例如 Debian / Ubuntu 可先安装 `curl ca-certificates python3`。
+安装不依赖目标服务器访问 GitHub，也无需 Rust 编译环境。手动调用安装器时可传入 `--no-auto-update` 关闭自动更新。
 
 接入凭证有效 15 分钟；它通过 stdin 和临时 0600 文件传递，不进入 curl URL 或安装器的 argv。
 复制的命令本身包含凭证，可能被 Shell 历史记录，请勿转发；成功或失败退出都会清理临时文件。
@@ -119,15 +121,86 @@ sudo systemctl status blink-agent
 
 Agent 仅主动访问 Master，无需开放入站端口。默认普通系统用户、只读系统视图、独立私有状态目录。
 修改配置后 `sudo systemctl restart blink-agent`。
-升级使用相同用户 / 状态目录，替换二进制后重启；不会自动拉取并执行远端更新。
+手动升级使用相同用户 / 状态目录，替换二进制后重启；自动升级见下节。
 
 重新接入已有机器时，在面板生成新的接入凭证，将其写入 root 的 0600 文件，
 先停止服务，然后按上方 `blink-agent enroll --token-file` 步骤注册、恢复身份文件归属，再启动服务。
 不要删除原有身份文件；凭证轮换由面板控制。
 
+### Agent 自动更新
+
+新的一键安装默认启用 `blink-agent-update.timer`：启动后约 3 分钟首次检查，之后每次结束约 15 分钟再检查，
+附加最多 2 分钟随机延迟，避免节点同时下载。更新源固定为本机配置 `server_url` 对应 Master 的
+`/downloads/agent/latest.json`；发布构建会自动生成该清单并随 Web 镜像部署。
+
+- 更新器由独立的 root systemd 服务运行，监控 Agent 仍可保持普通用户身份。
+- HTTPS 校验证书，不接受下载重定向；下载有时间和大小上限，校验压缩包及解压后二进制的 SHA256、版本和架构。
+- 以二进制 SHA256 识别变化，因此同版本重新构建也可更新；拒绝低于当前版本号的发布。
+- 原子替换二进制并重启 Agent；验证新进程至少运行 10 秒且已连接 Master，最长等待 60 秒。
+- 启动失败、崩溃或未连接 Master 时恢复旧二进制；失败的二进制不会反复安装，直到发布不同构建或显式重试。
+- 更新事务和旧二进制保存在 root 私有的 `/var/lib/blink-agent-update/`；执行中断后，下次定时任务先恢复旧版本。
+- 更新只替换 Agent 二进制，保留接入身份、监控配置、systemd 本地覆盖及 root 终端设置。更新时现有终端会断开，完成后重连即可。
+
+Master 尚未部署更新清单时，更新器记录提示并等下一周期，不影响监控。发布新版本后，需先部署 Master Web 镜像，
+节点才会从该 Master 获取新版本；仅推送代码或镜像不会直接影响节点。
+
+#### 已安装节点启用自动更新
+
+当前 0.1.0 节点可直接启用，无需重新注册。将以下四个文件复制到服务器同一目录（新版 Agent 压缩包也包含）：
+`enable-auto-update.sh`、`update-agent.py`、`blink-agent-update.service`、`blink-agent-update.timer`，均位于 `deploy/agent/`。
+安装 Python 3.9+ 和 CA 证书后执行：
+
+```bash
+sudo bash enable-auto-update.sh
+sudo systemctl start blink-agent-update.service
+sudo journalctl -u blink-agent-update.service --no-pager -n 30
+```
+
+检查更新而不安装、查看定时器、暂停更新以及显式重试失败构建：
+
+```bash
+sudo /usr/local/libexec/blink-agent-update --check
+sudo systemctl list-timers blink-agent-update.timer
+sudo systemctl disable --now blink-agent-update.timer
+sudo /usr/local/libexec/blink-agent-update --retry-failed
+```
+
+手动暂停 Agent 时更新器不会启动它；若存在被中断的更新事务，则优先执行恢复。
+更新器本身和 systemd 单元通过再次运行 `enable-auto-update.sh` 升级，下载包中的脚本不会在自动更新时执行。
+
 ### 网页终端权限
 
-默认关闭，必须在 Agent 的本地配置中显式开启：
+面板一键安装时勾选 **启用网页终端（root 用户）**，安装器会同时设置本地配置与 systemd override。
+未勾选时终端关闭，Agent 仍以普通 `blink-agent` 用户运行。
+
+#### 已安装节点切换为 root
+
+将 `deploy/agent/enable-root-terminal.sh` 和 `deploy/agent/root-terminal.conf.example` 复制到目标服务器同一目录，
+或从新版 Agent 发布压缩包解压这两个文件，然后在该目录执行：
+
+```bash
+sudo bash enable-root-terminal.sh
+```
+
+脚本保留原有接入身份和 Master 地址，备份配置为 `/etc/blink-agent/config.toml.before-root-terminal`，
+写入 root 配置与 `/etc/systemd/system/blink-agent.service.d/terminal.conf`，重新加载 systemd 并重启 Agent。
+已有终端会断开；待节点重新在线后，新建网页终端，执行 `id -un` 应输出 `root`。
+此切换适用于当前已安装的 Agent，无需更新二进制或重新注册。
+
+对应的本地配置为：
+
+```toml
+terminal_enabled = true
+terminal_user = "root"
+allow_root_terminal = true
+```
+
+Root override 同时解除普通监控服务的只读文件系统、私有临时目录、内核操作限制及内存 / 进程数限制，
+使终端可用于安装软件、修改系统配置和管理服务。终端身份与服务进程身份一起切换。
+
+#### 普通用户终端
+
+手动安装仍可使用普通用户终端，配置为：
 
 ```toml
 terminal_enabled = true
@@ -136,9 +209,8 @@ allow_root_terminal = false
 ```
 
 普通用户服务只能打开自身身份的 Shell。默认 systemd 沙箱允许其在状态目录操作，系统目录只读。
-如果确实需要 root 终端，可参考 `deploy/agent/root-terminal.conf.example` 创建 systemd override，
-并同时配置 `terminal_user = "root"`、`allow_root_terminal = true`。随后执行 daemon-reload 和 restart。
-此模式赋予 Master 所有者该机器的 root 运维能力。生产优先使用专用低权限运维用户。
+手动配置 root 终端时，须同时安装 `deploy/agent/root-terminal.conf.example` 为 systemd override，
+并配置 `terminal_user = "root"`、`allow_root_terminal = true`，随后执行 daemon-reload 和 restart。
 
 系统日志可见范围由服务用户权限决定。需要系统 journal 时，可以把 `blink-agent` 加入 `systemd-journal` 组并重启服务。
 ICMP 依赖系统 `ping` 命令与允许的 ping socket 权限；必要时为服务用户所在 GID 配置 `net.ipv4.ping_group_range`。
@@ -222,20 +294,38 @@ GitHub 镜像：`git@github.com:k1ngcyk/blink-node.git`。
 
 ### GitLab Runner 自动构建
 
-`.gitlab-ci.yml` 使用与 eduhub-web 相同的 **`build`** 标签（当前对应 runner #12），
-复用 runner 已有的 Docker 和镜像仓库登录。推送 `main` 后自动执行：
+`.gitlab-ci.yml` 的构建阶段使用 **`build`** 标签（当前对应 runner #12），
+复用 runner 已有的 Docker 和镜像仓库登录。部署阶段使用 Master 上的项目专用 **`blink-master-deploy`** Runner。
+推送 `main` 后自动执行：
 
 - Web 类型检查、lint、安全单测；
 - 构建两种架构的 musl Agent，测试安装、权限和失败回滚；
 - 构建统一运行镜像并验证真实 Compose、HTTPS/WSS、静态下载和 Linux PTY；
 - 全部成功后推送 `:0.1.0`、`:latest` 及完整 Git commit SHA 标签。
+- Master Runner 拉取该次提交的 SHA 标签，解析并固定镜像 digest，执行迁移，更新 Web / 网关并等待健康检查。
+- 验证 Agent 更新清单可用；部署失败时恢复旧镜像及 `.env`，节点随后通过定时任务获取成功发布的 Agent。
 
-runner 需要 Docker、Buildx、Compose 和访问镜像仓库的权限，不需要预装 Node 或 Rust。
+构建 runner 需要 Docker、Buildx、Compose、Python 3 和访问镜像仓库的权限，不需要预装 Node 或 Rust。
 构建使用该项目独立且持久的 BuildKit builder；缺少 ARM64 支持时会注册 QEMU binfmt。
 Rust 编译器始终原生运行，通过 Zig 交叉编译生成两种架构的 musl 二进制，避免在 QEMU 中编译 Rust；
 QEMU 只用于异构产物的运行测试和目标架构镜像步骤。Cargo 编译产物按架构缓存，新提交会取消过时的构建。
-`resource_group` 串行发布，避免同一项目并发更新标签。流水线不部署 Master。
+构建和生产部署各自通过 `resource_group` 串行执行；部署前验证提交仍是 `main` 最新提交，跳过过时流水线。
+生产部署不可被新提交自动取消，防止服务切换途中中断。镜像回滚不撤销已成功的数据库迁移，迁移须保持前向兼容。
 GitLab 产物只保存安装包与验证结果，不上传测试秘密或容器日志。
+
+#### Master 部署 Runner
+
+Master 安装官方 GitLab Runner 软件包，注册为 `blink/blink-node` 的项目专用 shell Runner：
+标签 `blink-master-deploy`、关闭无标签任务、锁定当前项目、并发数 1。构建仍由原有 `build` Runner 执行。
+注册令牌保存在 root 私有的 `/etc/gitlab-runner/config.toml`，不进入仓库。
+
+将 `deploy/setup-master-runner.sh` 和 `deploy/master-deploy.py` 放到 Master 同一目录，以 root 运行安装脚本。
+它安装 `/usr/local/sbin/blink-node-deploy` 和专用 sudo 规则；Runner 用户只传入完整提交 SHA，
+由 root 部署器管理 `/opt/blink-node/.env` 和 Compose，无需把生产秘密目录开放给 Runner。
+部署器固定拉取 `registry.windgyre.com/library/blink-node-web` 的公开镜像。
+
+旧 `.env` 和部署记录存放于 `/opt/blink-node/.deploy/`（0700）；中断的部署在下一次执行时先恢复旧版本。
+部署器及 Compose 配置变更需在 Master 更新安装；普通应用版本由流水线自动发布。
 
 ### 本机手动构建
 
@@ -246,7 +336,9 @@ bash deploy/build-agent.sh
 ```
 
 `bash deploy/test-installer.sh` 会在隔离双架构 Linux 容器中验证安装、校验失败拒绝、注册失败回滚、
-权限、重复安装保护及临时凭证清理；其中 systemctl 为测试替身，不修改宿主机服务。
+权限、重复安装保护、临时凭证清理、自动更新安装 / 禁用及旧节点启用；其中 systemctl 为测试替身，不修改宿主机服务。
+同时运行更新器回归，覆盖真实 HTTP 下载、包 / 二进制校验、同版本更新、失败回滚、崩溃恢复和连接健康判定。
+更新器测试也可单独执行 `python3 deploy/agent/test-updater.py`。
 
 随后可通过源码覆盖配置在本机构建统一运行镜像：
 

@@ -45,7 +45,7 @@ export function EnrollmentView({ value }: { value: Enrollment }) {
             setCopied(false);
           }}
         />
-        启用网页终端（普通 blink-agent 用户）
+        启用网页终端（root 用户）
       </label>
       <label className="field">
         一键安装命令 · Agent v{agentVersion}
@@ -74,8 +74,9 @@ export function EnrollmentView({ value }: { value: Enrollment }) {
       </Button>
       <ErrorBanner error={error} />
       <p className="muted text-xs">
-        支持 systemd Linux x86_64 / ARM64，需要 curl 和 CA 证书。Agent
-        默认低权限运行。命令含一次性凭证，请勿分享；已安装的节点请按部署文档升级或重新接入。
+        支持 systemd Linux x86_64 / ARM64，需要 curl、CA 证书和 Python 3.9+。Agent
+        未启用终端时以低权限运行，启用后以 root 运行，每 15
+        分钟检查自动更新。命令含一次性凭证，请勿分享；已安装的节点请按部署文档启用自动更新。
       </p>
       <Link href={`/servers/${value.id}`}>
         <Button className="w-full">

@@ -1,5 +1,5 @@
 DO $$
-DECLARE app_password text := trim(pg_read_file('/run/secrets/db_app_password'));
+DECLARE app_password text := btrim(pg_read_file('/run/secrets/db_app_password'), E' \t\r\n');
 BEGIN
   EXECUTE format('CREATE ROLE blink LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', app_password);
 END $$;

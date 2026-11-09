@@ -1,4 +1,4 @@
-stages: [build]
+stages: [build, deploy]
 workflow:
   auto_cancel:
     on_new_commit: interruptible
@@ -20,3 +20,21 @@ build-and-publish:
       - web/public/downloads/agent/
       - .local/docker-*/verification.json
       - .local/publish-metadata.json
+
+deploy-production:
+  stage: deploy
+  tags: [blink-master-deploy]
+  needs:
+    - job: build-and-publish
+      artifacts: false
+  resource_group: blink-node-production
+  timeout: 20m
+  interruptible: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  environment:
+    name: production
+    url: https://node.withblink.com
+    deployment_tier: production
+  script:
+    - bash deploy/ci-deploy.sh

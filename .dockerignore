@@ -7,3 +7,4 @@ web/.next
 web/public/downloads
 agent/target
 **/*.log
+**/__pycache__

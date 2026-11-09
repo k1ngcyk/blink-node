@@ -17,4 +17,4 @@ install -m 0755 -o root -g root "$1" /usr/local/bin/blink-agent
 install -m 0640 -o root -g blink-agent "$2" /etc/blink-agent/config.toml
 install -m 0644 "$script_dir/blink-agent.service" /etc/systemd/system/blink-agent.service
 systemctl daemon-reload
-echo 'Installed. Enroll before enabling blink-agent.service; see README for identity ownership.'
+echo 'Installed. Enroll before enabling blink-agent.service; then run enable-auto-update.sh for automatic updates. See README.'

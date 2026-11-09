@@ -68,7 +68,8 @@ const values: Record<string, string> = {
 };
 for (const [name, value] of Object.entries(values)) {
   const path = resolve(dir, name);
-  await writeFile(path, value, { mode: 0o600 });
+  // Match bootstrap.py: secret files end in a newline, including DB passwords.
+  await writeFile(path, `${value}\n`, { mode: 0o600 });
   // Local Compose bind-mounts preserve UID/mode. The 0700 parent protects host
   // access; only explicitly granted containers receive each readable file.
   await chmod(path, 0o444);
@@ -206,10 +207,18 @@ try {
   assert.equal(installer.status, 200);
   assert(installer.text.includes(`VERSION="${agentVersion}"`));
   assert.equal((await request(`${releasePath}/SHA256SUMS`)).status, 200);
+  const manifestResponse = await request("/downloads/agent/latest.json");
+  assert.equal(manifestResponse.status, 200);
+  const manifest = JSON.parse(manifestResponse.text);
+  assert.equal(manifest.schema, 1);
+  assert.equal(manifest.version, agentVersion);
   for (const arch of ["amd64", "arm64"]) {
     const artifact = await request(`${releasePath}/blink-agent-linux-${arch}.tar.gz`, "HEAD");
     assert.equal(artifact.status, 200);
     assert(Number(artifact.headers["content-length"]) > 1000000);
+    assert.equal(Number(artifact.headers["content-length"]), manifest.artifacts[arch].size);
+    assert.match(manifest.artifacts[arch].sha256, /^[a-f0-9]{64}$/);
+    assert.match(manifest.artifacts[arch].binary_sha256, /^[a-f0-9]{64}$/);
   }
   const page = await request("/login");
   assert.equal(page.status, 200);

@@ -1,5 +1,5 @@
 FROM debian:bookworm-slim AS dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 iputils-ping procps \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 iputils-ping procps systemd \
     && rm -rf /var/lib/apt/lists/*
 
 FROM dependencies AS base
@@ -7,6 +7,7 @@ COPY web/public/downloads /releases/downloads
 
 FROM base AS installer-test
 COPY web/tests/installer.py /test.py
+COPY deploy/agent/update-agent.py deploy/agent/test-updater.py /updater/
 CMD ["python3", "/test.py"]
 
 FROM debian:bookworm-slim AS agent

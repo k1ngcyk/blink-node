@@ -7,12 +7,14 @@ umask 077
 VERSION="@VERSION@"
 server=""
 terminal=false
+auto_update=true
 local_test=false
 die() { printf 'Blink Agent: %s\n' "$*" >&2; exit 1; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --server) [[ $# -ge 2 ]] || die 'Missing --server value'; server="$2"; shift 2 ;;
     --enable-terminal) terminal=true; shift ;;
+    --no-auto-update) auto_update=false; shift ;;
     --allow-insecure-localhost) local_test=true; shift ;;
     *) die "Unknown option: $1" ;;
   esac
@@ -34,9 +36,16 @@ for tool in curl sha256sum tar systemctl useradd install chown mktemp; do
   command -v "$tool" >/dev/null || die "Missing dependency: $tool (install curl, ca-certificates and systemd)."
 done
 systemctl show-environment >/dev/null 2>&1 || die 'systemd must be running as the service manager.'
+if [[ "$auto_update" == true ]]; then
+  command -v python3 >/dev/null || die 'Install python3 (3.9+) for automatic updates, or use --no-auto-update.'
+  python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die 'Python 3.9+ is required for automatic updates.'
+fi
 # Never silently replace an existing installation, identity, or local policy.
-for path in /etc/blink-agent /var/lib/blink-agent /usr/local/bin/blink-agent /etc/systemd/system/blink-agent.service; do
+for path in /etc/blink-agent /var/lib/blink-agent /usr/local/bin/blink-agent /etc/systemd/system/blink-agent.service /etc/systemd/system/blink-agent.service.d; do
   [[ ! -e "$path" && ! -L "$path" ]] || die "Existing $path found; see README for upgrade / re-enrollment."
+done
+for path in /usr/local/libexec/blink-agent-update /etc/systemd/system/blink-agent-update.service /etc/systemd/system/blink-agent-update.timer /var/lib/blink-agent-update; do
+  [[ ! -e "$path" && ! -L "$path" ]] || die "Existing $path found; see README for upgrades."
 done
 if id blink-agent >/dev/null 2>&1; then
   [[ $(id -u blink-agent) != 0 ]] || die 'blink-agent must not be root.'
@@ -74,10 +83,11 @@ fetch "$base/$archive" "$work/$archive"
 expected=$(awk -v name="$archive" '$2 == name && length($1) == 64 { print $1 }' "$work/SHA256SUMS")
 [[ "$expected" =~ ^[a-f0-9]{64}$ ]] || die 'Missing or ambiguous release checksum.'
 printf '%s  %s\n' "$expected" "$work/$archive" | sha256sum -c - >/dev/null || die 'Release checksum mismatch.'
-# Extract only the two expected files; never extract arbitrary archive paths.
+# Extract only expected files; never extract arbitrary archive paths.
 mkdir "$work/package"
-tar -xzf "$work/$archive" -C "$work/package" --no-same-owner --no-same-permissions blink-agent blink-agent.service
-for item in blink-agent blink-agent.service; do
+files=(blink-agent blink-agent.service root-terminal.conf.example update-agent.py enable-auto-update.sh blink-agent-update.service blink-agent-update.timer)
+tar -xzf "$work/$archive" -C "$work/package" --no-same-owner --no-same-permissions "${files[@]}"
+for item in "${files[@]}"; do
   [[ -f "$work/package/$item" && ! -L "$work/package/$item" ]] || die 'Invalid release archive.'
 done
 chmod 0755 "$work/package/blink-agent"
@@ -86,11 +96,13 @@ id blink-agent >/dev/null 2>&1 || useradd --system --home-dir /var/lib/blink-age
 install -d -m 0750 -o root -g blink-agent /etc/blink-agent
 install -d -m 0700 -o blink-agent -g blink-agent /var/lib/blink-agent
 created=true
+terminal_user=blink-agent
+[[ "$terminal" == false ]] || terminal_user=root
 cat > "$work/config.toml" <<EOF
 server_url = "$server"
 terminal_enabled = $terminal
-terminal_user = "blink-agent"
-allow_root_terminal = false
+terminal_user = "$terminal_user"
+allow_root_terminal = $terminal
 allow_insecure_localhost = $local_test
 EOF
 install -m 0640 -o root -g blink-agent "$work/config.toml" /etc/blink-agent/config.toml
@@ -107,7 +119,14 @@ fi
 chown blink-agent:blink-agent /var/lib/blink-agent/identity.json
 chmod 0600 /var/lib/blink-agent/identity.json
 rm -f "$work/token"
+if [[ "$terminal" == true ]]; then
+  install -d -m 0755 -o root -g root /etc/systemd/system/blink-agent.service.d
+  install -m 0644 -o root -g root "$work/package/root-terminal.conf.example" /etc/systemd/system/blink-agent.service.d/terminal.conf
+fi
 systemctl daemon-reload
 systemctl enable --now blink-agent
 systemctl is-active --quiet blink-agent || die 'Service failed to start.'
+if [[ "$auto_update" == true ]]; then
+  bash "$work/package/enable-auto-update.sh"
+fi
 printf 'Blink Agent %s installed (%s). Terminal: %s. Return to the panel; metrics arrive within a few seconds.\n' "$VERSION" "$arch" "$terminal"

@@ -1,0 +1,15 @@
+[Unit]
+Description=Blink Agent verified automatic update
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/blink-agent/config.toml
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/libexec/blink-agent-update
+TimeoutStartSec=5min
+UMask=0077
+StateDirectory=blink-agent-update
+StateDirectoryMode=0700

@@ -18,4 +18,5 @@ done
 cmp "$work/linux_amd64/install.sh" "$work/linux_arm64/install.sh"
 cp "$work/linux_amd64/install.sh" "$out/install.sh"
 cat "$work/linux_amd64/SHA256SUMS" "$work/linux_arm64/SHA256SUMS" > "$out/SHA256SUMS"
+python3 "$root/deploy/agent-release-manifest.py" "$out" "$version"
 printf 'Agent release ready: %s\n' "$out"

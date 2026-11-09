@@ -1,12 +1,23 @@
 # Optional /etc/systemd/system/blink-agent.service.d/terminal.conf
 # The master can control this account through PTY. Use only on machines you own.
-# Enable terminal_enabled and allow_root_terminal in config.toml separately.
+# Set terminal_enabled=true, terminal_user="root", allow_root_terminal=true.
 [Service]
 User=root
 Group=root
-ProtectSystem=off
+ProtectSystem=false
 ProtectHome=false
+PrivateTmp=false
+ProtectKernelTunables=false
+ProtectKernelModules=false
+ProtectControlGroups=false
 NoNewPrivileges=false
+RestrictSUIDSGID=false
+LockPersonality=false
+RestrictRealtime=false
+RestrictAddressFamilies=
 CapabilityBoundingSet=~
 AmbientCapabilities=
 ReadWritePaths=
+# Interactive maintenance commands share the agent's service cgroup.
+TasksMax=infinity
+MemoryMax=infinity
