@@ -230,6 +230,7 @@ ICMP 依赖系统 `ping` 命令与允许的 ping socket 权限；必要时为服
 - Cloudflare 仅维护 DNS-only A/AAAA。Caddy 使用 Let's Encrypt **HTTP-01** 自动签发、续期，禁用 TLS-ALPN-01；需域名正确解析且公网 TCP 80 可达。不会将 Cloudflare Token 下发到节点。
 - Caddy 仅在回环地址开放本地 TLS 端口；模板使用 HTTP/1.1、HTTP/2，移除上游 Alt-Svc。AnyTLS 读取由部署器同步的 Caddy 证书，证书变化后重启对应服务。
 - 当前固定内核：Xray `26.11.9`、sing-box `1.14.4`、Caddy `2.11.9`；构建时校验 SHA256 并镜像到 Master，节点从 Master 下载。
+- 构建下载遇到临时网络错误会重试；CI 可回退到现有 Master 的发布镜像，仍须匹配仓库固定的 SHA256。可通过 `BLINK_PROXY_ASSET_MIRROR` 指定 HTTPS 镜像目录。
 - REALITY 客户端已验证 **Xray 26.11.9 + chrome 指纹**。该版服务端要求带 X25519MLKEM768 的较新握手；sing-box 1.14.4 的 REALITY 客户端握手未通过，不能把所有旧客户端视为兼容。AnyTLS 使用 sing-box 客户端验证。
 
 ### 节点权限与升级

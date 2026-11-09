@@ -47,6 +47,8 @@ docker run --rm --platform "$native" --user "$(id -u):$(id -g)" -e HOME=/tmp \
   node node_modules/eslint/bin/eslint.js .
   node --import tsx --test tests/*.test.ts
 )
+python3 deploy/test-proxy-assets.py
+export BLINK_PROXY_ASSET_MIRROR="${BLINK_PROXY_ASSET_MIRROR:-https://node.withblink.com/downloads/proxy}"
 bash deploy/build-agent.sh
 bash deploy/test-installer.sh
 bash deploy/test-proxy.sh
