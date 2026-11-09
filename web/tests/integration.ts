@@ -539,6 +539,36 @@ try {
   await page.screenshot({ path: resolve(dir, "check-dialog.png") });
   await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 390, height: 844 });
+  await sql`UPDATE servers SET info=info || '{"proxy":true}'::jsonb WHERE id=${enrollment.id}`;
+  await page.goto(`${origin}/proxies`);
+  await page.getByRole("combobox", { name: "代理服务器" }).selectOption(enrollment.id);
+  await page.getByLabel("公网 IP（IPv4 / IPv6）").fill("8.8.8.8");
+  const hostSaved = page.waitForResponse(
+    (r) =>
+      r.url().endsWith(`/api/proxy/hosts/${enrollment.id}`) && r.request().method() === "PATCH",
+  );
+  await page.getByRole("button", { name: "保存节点设置", exact: true }).click();
+  const hostResponse = await hostSaved;
+  assert(hostResponse.ok(), await hostResponse.text());
+  await waitFor(
+    () => ok<{ addresses: string[] }>(`proxy/hosts/${enrollment.id}`),
+    (h) => h.addresses[0] === "8.8.8.8",
+  );
+  await page.getByRole("button", { name: "安装代理", exact: true }).click();
+  await page.getByRole("dialog").waitFor();
+  assert.equal(await page.getByLabel("监听端口", { exact: true }).inputValue(), "443");
+  await page.getByRole("button", { name: "添加规则", exact: true }).click();
+  await page.getByLabel("规则 1 匹配值").fill("example.com");
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+  await page.screenshot({ path: resolve(dir, "proxy-dialog-mobile.png") });
+  await page.getByLabel("协议", { exact: true }).selectOption("shadowsocks2022");
+  await page.getByLabel("名称", { exact: true }).fill("浏览器测试出口");
+  await page.getByRole("button", { name: "安装并应用", exact: true }).click();
+  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  await page.getByRole("cell", { name: /浏览器测试出口/ }).waitFor();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.screenshot({ path: resolve(dir, "proxy-desktop.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(origin);
   await page.getByText("集成测试服务器", { exact: true }).waitFor();
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));

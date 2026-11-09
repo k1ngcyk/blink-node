@@ -49,6 +49,11 @@ docker run --rm --platform "$native" --user "$(id -u):$(id -g)" -e HOME=/tmp \
 )
 bash deploy/build-agent.sh
 bash deploy/test-installer.sh
+bash deploy/test-proxy.sh
+(
+  cd web
+  node --import tsx tests/proxy-integration.ts
+)
 python3 deploy/test-master-deploy.py
 docker buildx build --platform "$native" --target runtime --load \
   --build-arg "HTTP_PROXY=${BLINK_BUILD_PROXY:-${HTTP_PROXY:-}}" --build-arg "HTTPS_PROXY=${BLINK_BUILD_PROXY:-${HTTPS_PROXY:-}}" \

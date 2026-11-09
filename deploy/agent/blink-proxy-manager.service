@@ -1,0 +1,19 @@
+[Unit]
+Description=Blink Node typed proxy deployment manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=blink-agent
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/blink-proxy/manager.py serve
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=blink-proxy
+RuntimeDirectoryMode=0750
+UMask=0077
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

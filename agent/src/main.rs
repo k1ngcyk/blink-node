@@ -2,6 +2,7 @@ mod checks;
 mod collectors;
 mod config;
 mod diagnostics;
+mod proxy;
 mod terminal;
 
 use anyhow::{Context, Result, bail};
@@ -228,8 +229,8 @@ async fn connect(config: &Config, identity: &Identity, info: &Value, spool: Spoo
         format!("Bearer {}", identity.credential).parse()?,
     );
     let settings = WebSocketConfig::default()
-        .max_message_size(Some(65536))
-        .max_frame_size(Some(65536))
+        .max_message_size(Some(256 * 1024))
+        .max_frame_size(Some(256 * 1024))
         .max_write_buffer_size(1024 * 1024);
     let (ws, _) = tokio::time::timeout(
         Duration::from_secs(15),
@@ -237,6 +238,8 @@ async fn connect(config: &Config, identity: &Identity, info: &Value, spool: Spoo
     )
     .await??;
     let (mut sink, mut stream) = ws.split();
+    let mut info = info.clone();
+    info["proxy"] = json!(config.proxy_enabled && proxy::available());
     sink.send(Message::Text(
         json!({"v":1,"type":"hello","info":info}).to_string().into(),
     ))
@@ -244,15 +247,23 @@ async fn connect(config: &Config, identity: &Identity, info: &Value, spool: Spoo
     let (out_tx, mut out_rx) = mpsc::channel::<Value>(32);
     let (done_tx, mut done_rx) = mpsc::channel::<String>(8);
     let semaphore = Arc::new(Semaphore::new(4));
+    let proxy_semaphore = Arc::new(Semaphore::new(1));
     let mut terminals = Terminals(HashMap::new());
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut awaiting: Option<(String, u64, std::time::Instant)> = None;
     let mut welcome = false;
     let mut last_message = std::time::Instant::now();
+    let mut last_proxy_status = std::time::Instant::now() - Duration::from_secs(60);
     loop {
         tokio::select! {
             _=tick.tick()=>{
+                if welcome && config.proxy_enabled && last_proxy_status.elapsed() >= Duration::from_secs(60) {
+                    last_proxy_status = std::time::Instant::now();
+                    if let Some(message) = proxy::status().await {
+                        tokio::time::timeout(Duration::from_secs(5),sink.send(Message::Text(message.to_string().into()))).await??;
+                    }
+                }
                 if last_message.elapsed()>Duration::from_secs(50){bail!("Heartbeat timeout");}
                 if awaiting.as_ref().is_some_and(|(_,_,at)|at.elapsed()>Duration::from_secs(20)){bail!("Metrics acknowledgement timeout");}
                 if welcome && awaiting.is_none(){
@@ -287,6 +298,16 @@ async fn connect(config: &Config, identity: &Identity, info: &Value, spool: Spoo
                                 tokio::spawn(async move{if terminal::run(c,i,stream,rx).await.is_err(){tracing::warn!("Terminal session ended with error");}let _=done.send(id).await;});
                             },
                             Some("terminal.close")=>{if let Some(id)=m["id"].as_str() && let Some(tx)=terminals.0.remove(id){let _=tx.send(());}},
+                            Some("proxy.run")=>{
+                                if !config.proxy_enabled { continue; }
+                                let Ok(permit) = proxy_semaphore.clone().try_acquire_owned() else { continue; };
+                                let node_id = identity.node_id.clone().context("Missing node identity")?;
+                                let tx = out_tx.clone();
+                                tokio::spawn(async move {
+                                    let _permit = permit;
+                                    if let Ok(result) = proxy::run(m, &node_id).await { let _ = tx.send(result).await; }
+                                });
+                            },
                             Some("check.run")|Some("diagnostic.run")=>{
                                 let id=m["id"].as_str().context("Missing task id")?.to_string();uuid::Uuid::parse_str(&id)?;
                                 let kind=m["kind"].as_str().context("Missing task kind")?.to_string();let tx=out_tx.clone();

@@ -11,6 +11,12 @@ import { agentMessage, checkResultSchema } from "../src/server/protocol";
 import { ingest, aggregate, retention, ensurePartitions } from "../src/server/metrics";
 import { evaluateAlerts, deliverNotifications } from "../src/server/alerts";
 import { runCheck } from "../src/server/network";
+import {
+  dispatchProxy,
+  initialProxyScan,
+  receiveProxyResult,
+  receiveProxyStatus,
+} from "../src/server/proxy";
 
 const cfg = config();
 // A dedicated connection owns the singleton worker lease. Multiple instances must
@@ -242,6 +248,7 @@ function attachAgent(ws: WebSocket, id: string, tokenHash: string) {
           clearTimeout(helloTimer);
           await sql`UPDATE servers SET info=${sql.json(m.info)},last_seen=now() WHERE id=${id}`;
           send(ws, { v: 1, type: "welcome", intervalSeconds: 5 });
+          if (m.info.proxy) await initialProxyScan(id);
           broadcast();
         } else if (m.type === "metrics") {
           await ingest(id, m.samples);
@@ -259,6 +266,11 @@ function attachAgent(ws: WebSocket, id: string, tokenHash: string) {
           await saveCheck(m.result, id);
         } else if (m.type === "diagnostic.result") {
           await sql`UPDATE diagnostic_jobs SET state=${m.ok ? "done" : "failed"},result=${m.result} WHERE id=${m.id} AND server_id=${id} AND state='running' AND expires_at>now()`;
+        } else if (m.type === "proxy.result") {
+          await receiveProxyResult(id, m);
+          broadcast();
+        } else if (m.type === "proxy.status") {
+          await receiveProxyStatus(id, m.status);
         }
       })
       .catch((e) => {
@@ -509,6 +521,12 @@ server.listen(cfg.gatewayPort, cfg.gatewayHost, () =>
   console.log(`Blink gateway listening on ${cfg.gatewayHost}:${cfg.gatewayPort}`),
 );
 periodic(2000, dispatch);
+periodic(3000, () =>
+  dispatchProxy((id, message) => {
+    const a = agents.get(id);
+    return !!a?.hello && send(a.ws, message);
+  }),
+);
 periodic(10000, validateConnections);
 periodic(15000, async () => {
   const live: string[] = [];

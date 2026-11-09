@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { proxyResult, proxyStatusMessage } from "./proxy-model";
 const number = z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const percent = z.number().min(0).max(100);
 const name = z.string().min(1).max(256);
@@ -54,6 +55,7 @@ export const infoSchema = z.object({
   version: name,
   terminal: z.boolean(),
   diagnostics: z.boolean(),
+  proxy: z.boolean().optional().default(false),
 });
 export const checkResultSchema = z.object({
   id: z.uuid(),
@@ -66,6 +68,8 @@ export const checkResultSchema = z.object({
   error: z.string().max(300).nullable(),
 });
 export const agentMessage = z.discriminatedUnion("type", [
+  proxyResult,
+  proxyStatusMessage,
   z.object({ type: z.literal("hello"), v: z.literal(1), info: infoSchema }),
   z.object({
     type: z.literal("metrics"),

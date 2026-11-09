@@ -31,6 +31,7 @@ export function useResource<T>(path: string, interval = 0) {
   const [revision, bump] = useReducer((n) => n + 1, 0);
   const refresh = useCallback(() => bump(), []);
   useEffect(() => {
+    if (!path) return;
     let alive = true,
       inFlight = false;
     function load() {

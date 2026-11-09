@@ -7,6 +7,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./ui/dialog";
 import { ErrorBanner } from "./common";
+import { ProxySettings } from "./proxy-settings";
 type Channel = { id: string; name: string; kind: string; enabled: boolean };
 export function Settings() {
   const session = useResource<{ username: string; elevatedUntil: string }>("session", 30000),
@@ -145,6 +146,7 @@ export function Settings() {
           </div>
         </section>
       </div>
+      <ProxySettings />
       <section className="panel section-gap">
         <div className="panel-header">
           <h2>通知渠道</h2>

@@ -1,5 +1,5 @@
 FROM debian:bookworm-slim AS dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 iputils-ping procps systemd \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 iputils-ping procps systemd openssl \
     && rm -rf /var/lib/apt/lists/*
 
 FROM dependencies AS base
@@ -9,6 +9,10 @@ FROM base AS installer-test
 COPY web/tests/installer.py /test.py
 COPY deploy/agent/update-agent.py deploy/agent/test-updater.py /updater/
 CMD ["python3", "/test.py"]
+
+FROM base AS proxy-test
+COPY deploy/agent/proxy-manager.py deploy/agent/proxy-assets.json deploy/agent/test-proxy.py /proxy/
+CMD ["python3", "/proxy/test-proxy.py", "--integration"]
 
 FROM debian:bookworm-slim AS agent
 COPY web/public/downloads /releases/downloads

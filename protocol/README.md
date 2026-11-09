@@ -21,7 +21,8 @@ remote command field exists. PTY is a separately enabled, owner-authorized capab
 
 ## Agent → master
 
-- `hello {info}`: hostname, os, kernel, arch, cpuModel, cpuCount, version, terminal, diagnostics.
+- `hello {info}`: hostname, os, kernel, arch, cpuModel, cpuCount, version, terminal, diagnostics, proxy.
+  `proxy` defaults to false for older agents; true requires the local deployment socket.
 - `metrics {samples}`: maximum 20 samples per message; Agent currently sends at most 10.
   Each sample includes `bootId` (Agent-start UUID), monotonic `seq`, RFC3339 UTC `at`, uptime,
   CPU / cores / load, memory and swap byte counts, per-mount capacity / inode counts,
@@ -29,6 +30,9 @@ remote command field exists. PTY is a separately enabled, owner-authorized capab
 - `check.result {result}`: id, at, ok, latencyMs, loss, status, certificateDays, error.
   A result must match a pending check assigned to that Agent and have a recent timestamp.
 - `diagnostic.result {id,ok,result}`: bounded text, matched to an unexpired assigned job.
+- `proxy.result {taskId,desiredVersion,ok,result}`: matched to the assigned server and running
+  job. Scans contain encrypted-at-rest discoveries; apply results contain allowlisted status.
+- `proxy.status {status}`: bounded, credential-free managed service / certificate status, every minute.
 
 ## Master → Agent
 
@@ -41,6 +45,10 @@ remote command field exists. PTY is a separately enabled, owner-authorized capab
 - `diagnostic.run {id,kind,unit}`: allowlisted `processes`, `services`, `logs`; fixed executable
   and argument construction, no shell interpolation. Optional unit has strict validation.
 - `terminal.open {id,streamToken}` / `terminal.close {id}`: Unix identity is decided locally.
+- `proxy.run {taskId,resourceId,desiredVersion,deadline,operation,payload}`: `scan` or `apply`.
+  Agent validates server identity, bounds and deadline, then forwards through the group-restricted
+  `/run/blink-proxy/control.sock`. Payload contains typed proxy specs, credentials, routes, node
+  addresses, ACME email and firewall mode; no executable, shell or arbitrary output-path fields.
 
 ## Terminal stream
 
@@ -49,9 +57,15 @@ Raw output has bounded per-frame size and buffers; the connection closes on back
 Authentication expires with the browser session. Idle limit 15 minutes; absolute limit 1 hour.
 Shell exit, browser disconnect, credential revocation and gateway restart end the PTY session.
 
-## Future task extension
+## Proxy task delivery
 
-Proxy service management should introduce versioned, typed operations with `taskId`,
-`resourceId`, `desiredVersion`, deadline and idempotent outcome. Add each operation to
-explicit validators and Agent dispatch only after implementation. Host authorization and
-`proxy_instance` resource grants remain separate.
+One pending task per node. Encrypted jobs persist before dispatch; unacknowledged jobs are
+redelivered after 45 seconds with the same ID and payload. Dependencies must complete before
+an entrance task is dispatched. Socket/transport failure is not treated as a confirmed failure;
+the helper's seven-day durable ledger answers redelivery. Jobs expire after 30 minutes.
+
+Apply generations are monotonically versioned. The local transaction journal restores prior
+configuration, units and owned firewall rules after failure/interruption. Successful same-version
+redelivery verifies its payload fingerprint. Cloudflare changes and multi-node deployments are
+not globally atomic: failures are visible and a new apply reconciles desired configuration.
+Proxy operations and credential access require owner authorization and recent elevation.

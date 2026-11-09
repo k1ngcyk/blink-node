@@ -116,8 +116,12 @@ for terminal, auto_update in ((False, True), (True, True), (False, False)):
         assert Path('/var/lib/blink-agent-update').stat().st_mode & 0o777 == 0o700
         subprocess.run(['systemd-analyze', 'verify', '/etc/systemd/system/blink-agent-update.service', '/etc/systemd/system/blink-agent-update.timer'], check=True, timeout=15)
     else:
-        assert calls[-3:] == ['daemon-reload', 'enable --now blink-agent', 'is-active --quiet blink-agent']
+        assert calls[-2:] == ['enable --now blink-agent', 'is-active --quiet blink-agent']
         assert not Path('/usr/local/libexec/blink-agent-update').exists()
+    assert Path('/usr/local/libexec/blink-proxy/manager.py').stat().st_uid == 0
+    assert Path('/var/lib/blink-proxy/manager').stat().st_mode & 0o777 == 0o700
+    assert 'enable --now blink-proxy-manager' in calls
+    subprocess.run(['systemd-analyze', 'verify', '/etc/systemd/system/blink-proxy-manager.service'], check=True, timeout=15)
     assert 'Existing' in run(ok=False).stderr
     assert json.loads(identity.read_text()) == data, 'repeat install must preserve identity'
     sample = json.loads(subprocess.check_output(['runuser', '-u', 'blink-agent', '--', '/usr/local/bin/blink-agent', 'inspect']))

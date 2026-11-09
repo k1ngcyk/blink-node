@@ -36,10 +36,8 @@ for tool in curl sha256sum tar systemctl useradd install chown mktemp; do
   command -v "$tool" >/dev/null || die "Missing dependency: $tool (install curl, ca-certificates and systemd)."
 done
 systemctl show-environment >/dev/null 2>&1 || die 'systemd must be running as the service manager.'
-if [[ "$auto_update" == true ]]; then
-  command -v python3 >/dev/null || die 'Install python3 (3.9+) for automatic updates, or use --no-auto-update.'
-  python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die 'Python 3.9+ is required for automatic updates.'
-fi
+command -v python3 >/dev/null || die 'Install python3 (3.9+) for proxy management and automatic updates.'
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die 'Python 3.9+ is required.'
 # Never silently replace an existing installation, identity, or local policy.
 for path in /etc/blink-agent /var/lib/blink-agent /usr/local/bin/blink-agent /etc/systemd/system/blink-agent.service /etc/systemd/system/blink-agent.service.d; do
   [[ ! -e "$path" && ! -L "$path" ]] || die "Existing $path found; see README for upgrade / re-enrollment."
@@ -85,7 +83,7 @@ expected=$(awk -v name="$archive" '$2 == name && length($1) == 64 { print $1 }' 
 printf '%s  %s\n' "$expected" "$work/$archive" | sha256sum -c - >/dev/null || die 'Release checksum mismatch.'
 # Extract only expected files; never extract arbitrary archive paths.
 mkdir "$work/package"
-files=(blink-agent blink-agent.service root-terminal.conf.example update-agent.py enable-auto-update.sh blink-agent-update.service blink-agent-update.timer)
+files=(blink-agent blink-agent.service root-terminal.conf.example update-agent.py enable-auto-update.sh blink-agent-update.service blink-agent-update.timer proxy-manager.py proxy-assets.json enable-proxy.sh blink-proxy-manager.service)
 tar -xzf "$work/$archive" -C "$work/package" --no-same-owner --no-same-permissions "${files[@]}"
 for item in "${files[@]}"; do
   [[ -f "$work/package/$item" && ! -L "$work/package/$item" ]] || die 'Invalid release archive.'
@@ -124,6 +122,7 @@ if [[ "$terminal" == true ]]; then
   install -m 0644 -o root -g root "$work/package/root-terminal.conf.example" /etc/systemd/system/blink-agent.service.d/terminal.conf
 fi
 systemctl daemon-reload
+bash "$work/package/enable-proxy.sh"
 systemctl enable --now blink-agent
 systemctl is-active --quiet blink-agent || die 'Service failed to start.'
 if [[ "$auto_update" == true ]]; then

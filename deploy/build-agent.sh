@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+python3 "$root/deploy/fetch-proxy-assets.py"
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$root/agent/Cargo.toml" | head -1)
 web_version=$(sed -n 's/^  "version": "\([^"]*\)".*/\1/p' "$root/web/package.json" | head -1)
 [[ "$version" == "$web_version" ]] || { echo 'Agent and Web versions must match.' >&2; exit 1; }

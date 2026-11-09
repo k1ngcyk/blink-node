@@ -14,7 +14,7 @@
 - PostgreSQL 分区、分钟 / 小时聚合、有界离线缓存、重连补传与去重。
 - Agent 定时自动更新、双重 SHA256 校验、同版本构建识别、连接健康检查与失败回滚。
 
-后续代理服务实例与资源授权已预留边界；AnyTLS、Shadowsocks 2022、VLESS + REALITY 的安装管理属于后续版本。
+- 代理管理：Xray REALITY/Vision、sing-box AnyTLS / SS2022、服务端两跳分流、Cloudflare A/AAAA、节点 HTTP-01 证书、UFW 与已有配置扫描。
 
 ## 结构
 
@@ -215,6 +215,38 @@ allow_root_terminal = false
 系统日志可见范围由服务用户权限决定。需要系统 journal 时，可以把 `blink-agent` 加入 `systemd-journal` 组并重启服务。
 ICMP 依赖系统 `ping` 命令与允许的 ping socket 权限；必要时为服务用户所在 GID 配置 `net.ipv4.ping_group_range`。
 容器 / 精简发行版没有 systemd 或 journal 时，相应诊断显示不可用。
+
+## 代理服务
+
+在“设置 → 代理节点 · DNS 与证书”保存限定 Zone 的 Cloudflare Token（Zone Read + DNS Edit）与 ACME 邮箱，然后在“代理服务”中选择节点，保存公网 IP 和防火墙策略。
+
+先在落地节点安装 **Shadowsocks 2022**，再在入口节点安装 **AnyTLS** 或 **VLESS · REALITY / Vision**，选择默认出口；规则按列表顺序匹配完整域名、域名后缀或 IP/CIDR，支持指定其他 SS2022 出口或直接出网。出口失效时链路失败，不自动改走直连。入口和落地都需要在面板中管理。
+
+### REALITY 与证书
+
+- REALITY 固定 Xray / TCP 443，默认目标为 `127.0.0.1:8003`，使用 PROXY v2；本地 Caddy 先解析 PROXY，再处理 TLS，按域名反代指定 HTTPS 源站。
+- Cloudflare 仅维护 DNS-only A/AAAA。Caddy 使用 Let's Encrypt **HTTP-01** 自动签发、续期，禁用 TLS-ALPN-01；需域名正确解析且公网 TCP 80 可达。不会将 Cloudflare Token 下发到节点。
+- Caddy 仅在回环地址开放本地 TLS 端口；模板使用 HTTP/1.1、HTTP/2，移除上游 Alt-Svc。AnyTLS 读取由部署器同步的 Caddy 证书，证书变化后重启对应服务。
+- 当前固定内核：Xray `26.11.9`、sing-box `1.14.4`、Caddy `2.11.9`；构建时校验 SHA256 并镜像到 Master，节点从 Master 下载。
+- REALITY 客户端已验证 **Xray 26.11.9 + chrome 指纹**。该版服务端要求带 X25519MLKEM768 的较新握手；sing-box 1.14.4 的 REALITY 客户端握手未通过，不能把所有旧客户端视为兼容。AnyTLS 使用 sing-box 客户端验证。
+
+### 节点权限与升级
+
+新安装包自动配置 `blink-proxy-manager.service`。部署器以 root 运行，仅通过受限 Unix socket 接受类型化配置任务；代理内核以独立 `blink-proxy` 用户运行，监控 Agent 可继续使用普通用户。
+
+存量节点先更新 Agent，再从同版本、已核对 SHA256 的发布包解压 `enable-proxy.sh`、`proxy-manager.py`、`proxy-assets.json` 和 `blink-proxy-manager.service`，以 root 运行 `bash enable-proxy.sh`。无需重新注册。Agent 自动更新器只更新 Agent 二进制，部署器后续升级仍需重新执行该脚本。
+
+默认仅管理已启用的 UFW；选择安装启用时会保留配置及实际监听的 SSH 端口。SS2022 仅为已关联入口的公网地址添加规则。已有管理员规则不接管；云安全组需同步配置。外部防火墙模式由管理员维护访问规则。
+
+### 扫描、部署与恢复
+
+首次接入自动扫描 Xray、sing-box、Caddy、Nginx 的运行参数、常见配置目录、多文件 JSON/JSONC 及普通 Web include；本地目标按端口关联 Web 候选。扫描快照加密保存，查看时隐藏结构化密钥。外部服务以只读方式导入；不自动接管。容器命名空间、自定义启动器、动态配置和复杂变量/include 需要人工核对，合并视图不替代内核实际配置。
+
+部署执行内核配置校验，写入独立配置代次，启用服务后检查状态。失败恢复原配置、服务与所管理的防火墙规则；断线按同一任务 ID 重投，节点持久化结果避免重复执行。依赖出口先应用，入口随后启动；跨节点不是分布式原子事务，任务失败后使用“重新应用配置”协调重试。运行状态和证书信息约每分钟回报。
+
+状态目录：`/var/lib/blink-proxy/`；当前配置：`current/`；私有事务与任务记录：`manager/`。本地手工修改已管理配置会触发漂移检查，应先核对变更。卸载停止并移除托管服务，保留配置代次、证书和 DNS 记录便于恢复。
+
+验证命令：`bash deploy/test-proxy.sh`（隔离容器真实内核）、`cd web && npm run test:proxy`（PostgreSQL/API）。公开 Cloudflare DNS 与 Let's Encrypt 签发仍需在实际域名、节点上验收。
 
 ## 安全设计
 

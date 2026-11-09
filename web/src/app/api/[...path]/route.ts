@@ -9,6 +9,7 @@ import { config } from "@/server/config";
 import { checkInput, ruleInput, serverUpdate } from "@/server/protocol";
 import { traffic } from "@/server/metrics";
 import { validateTarget } from "@/server/network";
+import { proxyApi } from "@/server/proxy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,6 +40,7 @@ async function handle(request: Request, context: Context) {
     }
     const user = await owner(request.headers);
     await rateLimit(`api:${user.id}`, 1200, 60);
+    if (path[0] === "proxy") return await proxyApi(request, path, user);
     if (route === "session" && method === "GET")
       return json({
         username: user.username,

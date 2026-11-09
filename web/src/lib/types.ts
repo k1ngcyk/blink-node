@@ -30,6 +30,7 @@ export type Server = {
     version?: string;
     terminal?: boolean;
     diagnostics?: boolean;
+    proxy?: boolean;
   };
   traffic?: {
     start: string;

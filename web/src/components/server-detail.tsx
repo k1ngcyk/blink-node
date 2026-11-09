@@ -21,6 +21,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { ErrorBanner, Loading, ServerStatus, Meter } from "./common";
 import { MetricCharts, type History } from "./metric-charts";
 import { EnrollmentView } from "./dashboard";
+import { Proxies } from "./proxies";
 const TerminalPanel = dynamic(() => import("./terminal-panel").then((m) => m.TerminalPanel), {
   ssr: false,
   loading: () => <Loading />,
@@ -64,6 +65,7 @@ export function ServerDetail({ id }: { id: string }) {
           { id: "overview", name: "监控概览" },
           { id: "terminal", name: "网页终端" },
           { id: "diagnostics", name: "运行诊断" },
+          { id: "proxy", name: "代理服务" },
           { id: "settings", name: "服务器设置" },
         ].map((t) => (
           <button role="tab" aria-selected={tab === t.id} key={t.id} onClick={() => setTab(t.id)}>
@@ -249,6 +251,7 @@ export function ServerDetail({ id }: { id: string }) {
       )}
       {tab === "terminal" && <TerminalPanel serverId={id} enabled={online && !!s.info.terminal} />}
       {tab === "diagnostics" && <Diagnostics server={s} />}
+      {tab === "proxy" && <Proxies serverId={id} />}
       {tab === "settings" && <ServerSettings server={s} refresh={refresh} />}
     </>
   );
