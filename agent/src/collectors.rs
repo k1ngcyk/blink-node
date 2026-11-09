@@ -199,6 +199,8 @@ impl Collector {
         }
     }
 }
+// libc inode counters are u32 on Darwin and u64 on 64-bit Linux.
+#[allow(clippy::unnecessary_cast)]
 fn inodes(path: &std::path::Path) -> (Option<u64>, Option<u64>) {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {

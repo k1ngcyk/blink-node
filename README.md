@@ -90,7 +90,8 @@ TOTP 有重放保护，同一个验证码只能成功使用一次；需要再次
 ### 手动安装
 
 主流 systemd Linux，内核指标来自宿主机。Agent 推荐作为原生服务运行。
-在对应 CPU 架构上构建，或从你自己的 CI artifacts 取得二进制并核对 SHA256：
+在对应 CPU 架构上构建，或从 Master 的 `/downloads/agent/v0.1.0/` 取得对应架构的压缩包，
+用同目录的 `SHA256SUMS` 核对后解压：
 
 ```bash
 cd agent
@@ -243,7 +244,6 @@ bash deploy/publish.sh
 静态安装资源已包含在镜像里，Web / 网关仍由 Compose 作为独立进程运行。
 发布前统一更新 `web/package.json`、`agent/Cargo.toml` 与锁文件中的版本号，以及 Compose 默认镜像标签。
 
-推送 `v<version>` Git tag 后，`.github/workflows/release.yml` 在原生双架构 runner 上构建 musl Agent，
-自动创建 GitHub Release，附带两种架构的压缩包、`SHA256SUMS` 和安装脚本。
-普通分支 push 只执行检查；GitHub 工作流不需要镜像仓库密码，也不会部署 Master。
-发布产物与本机测试秘密均被 Git 忽略。
+Agent 构建、镜像发布和服务器安装均不依赖 GitHub Actions。
+GitHub 仓库用于保存代码，Verify 工作流只做自动检查；它不需要镜像仓库密码，也不会发布或部署 Master。
+发布产物与本机测试秘密均被 Git 忽略，服务器只需访问你的 Master 下载地址。

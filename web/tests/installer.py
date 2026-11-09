@@ -50,6 +50,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Handler, directory='/releases'))
 threading.Thread(target=server.serve_forever, daemon=True).start()
 origin = f'http://localhost:{server.server_port}'
+Path('/etc/systemd/system').mkdir(parents=True, exist_ok=True)
 Path('/usr/local/bin/systemctl').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> /tmp/systemctl-calls\nexit 0\n')
 Path('/usr/local/bin/systemctl').chmod(0o755)
 

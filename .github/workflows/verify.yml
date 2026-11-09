@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with: {components: rustfmt, clippy}
+        with: {components: "rustfmt, clippy"}
       - run: cargo fmt --check && cargo test --locked && cargo clippy --all-targets -- -D warnings
       - run: cargo build --release --locked
       - name: Package Linux binary

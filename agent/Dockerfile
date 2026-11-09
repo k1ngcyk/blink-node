@@ -3,6 +3,11 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
+
+FROM builder AS checks
+RUN rustup component add rustfmt clippy
+RUN cargo fmt --check && cargo test --locked && cargo clippy --all-targets -- -D warnings
+
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates iputils-ping procps && rm -rf /var/lib/apt/lists/*
 RUN useradd --uid 10001 --user-group --create-home --home-dir /var/lib/blink-agent --shell /bin/sh blink-agent
