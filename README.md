@@ -213,7 +213,7 @@ Docker 验证会构建真实镜像，使用临时 CA 和回环 HTTPS 端口，�
 数据库最小权限、非 root Linux Agent、PTY 和子进程清理；结束后删除测试项目自身的容器与卷。
 本地测试的 HTTP / localhost 模式只用于开发，不应用于公网。
 
-常规 Verify 工作流在 Linux x86_64 与 ARM64 上运行 Rust 检查并产出 CI artifacts；不部署服务。
+构建和验证均在本地执行；仓库不包含 GitHub Actions 工作流。
 
 ## 构建和发布
 
@@ -245,5 +245,5 @@ bash deploy/publish.sh
 发布前统一更新 `web/package.json`、`agent/Cargo.toml` 与锁文件中的版本号，以及 Compose 默认镜像标签。
 
 Agent 构建、镜像发布和服务器安装均不依赖 GitHub Actions。
-GitHub 仓库用于保存代码，Verify 工作流只做自动检查；它不需要镜像仓库密码，也不会发布或部署 Master。
+GitHub 仓库仅用于保存代码。本机执行上述脚本完成构建、验证与镜像推送。
 发布产物与本机测试秘密均被 Git 忽略，服务器只需访问你的 Master 下载地址。
