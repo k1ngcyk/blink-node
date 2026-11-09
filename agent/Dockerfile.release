@@ -1,13 +1,18 @@
-FROM rust:1.92-bookworm AS build
-RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && rm -rf /var/lib/apt/lists/*
+FROM --platform=$BUILDPLATFORM rust:1.92-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends python3-venv && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/zig \
+    && /opt/zig/bin/pip install --no-cache-dir --only-binary=:all: cargo-zigbuild==0.24.1 ziglang==0.14.1
+ENV PATH="/opt/zig/bin:${PATH}"
+RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 ARG TARGETARCH
 RUN case "$TARGETARCH" in amd64) target=x86_64-unknown-linux-musl;; arm64) target=aarch64-unknown-linux-musl;; *) exit 1;; esac \
-    && printf '%s' "$target" > /rust-target && rustup target add "$target"
-ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+    && printf '%s' "$target" > /rust-target
 WORKDIR /src
 COPY agent/Cargo.toml agent/Cargo.lock ./
 COPY agent/src ./src
-RUN --mount=type=cache,target=/usr/local/cargo/registry CC=musl-gcc cargo build --release --locked --target "$(cat /rust-target)" \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=blink-agent-musl-${TARGETARCH},target=/src/target \
+    cargo zigbuild --release --locked --target "$(cat /rust-target)" \
     && cp "target/$(cat /rust-target)/release/blink-agent" /blink-agent
 COPY deploy/agent/blink-agent.service /package/blink-agent.service
 COPY deploy/agent/bootstrap.sh /install.sh.in

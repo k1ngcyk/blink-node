@@ -1,10 +1,14 @@
 stages: [build]
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
 
 build-and-publish:
   stage: build
   tags: [build]
   resource_group: blink-node-release
   timeout: 1h
+  interruptible: true
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
   script:

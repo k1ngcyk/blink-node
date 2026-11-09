@@ -232,6 +232,8 @@ GitHub 镜像：`git@github.com:k1ngcyk/blink-node.git`。
 
 runner 需要 Docker、Buildx、Compose 和访问镜像仓库的权限，不需要预装 Node 或 Rust。
 构建使用该项目独立且持久的 BuildKit builder；缺少 ARM64 支持时会注册 QEMU binfmt。
+Rust 编译器始终原生运行，通过 Zig 交叉编译生成两种架构的 musl 二进制，避免在 QEMU 中编译 Rust；
+QEMU 只用于异构产物的运行测试和目标架构镜像步骤。Cargo 编译产物按架构缓存，新提交会取消过时的构建。
 `resource_group` 串行发布，避免同一项目并发更新标签。流水线不部署 Master。
 GitLab 产物只保存安装包与验证结果，不上传测试秘密或容器日志。
 
