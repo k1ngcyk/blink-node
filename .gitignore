@@ -1,0 +1,14 @@
+node_modules/
+.next/
+target/
+.env
+.env.*
+!.env.example
+.secrets/
+.local/
+test-results/
+playwright-report/
+*.log
+.DS_Store
+web/public/downloads/
+*.tsbuildinfo

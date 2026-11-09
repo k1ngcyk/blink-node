@@ -1,0 +1,57 @@
+name: Release Agent
+on:
+  push:
+    tags: ['v[0-9]*']
+permissions: {contents: read}
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, arch: amd64}
+          - {runner: ubuntu-24.04-arm, arch: arm64}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release version
+        run: |
+          python3 - <<'PY'
+          import json, os, tomllib
+          agent = tomllib.load(open('agent/Cargo.toml', 'rb'))['package']['version']
+          web = json.load(open('web/package.json'))['version']
+          assert os.environ['GITHUB_REF_NAME'] == 'v' + agent and agent == web
+          PY
+      - name: Build portable musl release
+        run: docker buildx build --platform linux/${{ matrix.arch }} -f agent/Dockerfile.release --target artifacts --output type=local,dest=dist .
+      - name: Verify release artifact
+        working-directory: dist
+        run: |
+          sha256sum -c SHA256SUMS
+          bash -n install.sh
+          tar -xzf blink-agent-linux-${{ matrix.arch }}.tar.gz blink-agent
+          ./blink-agent --version
+          ./blink-agent inspect > /dev/null
+          rm blink-agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-release-${{ matrix.arch }}
+          path: dist/
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions: {contents: write}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {pattern: 'agent-release-*', path: artifacts}
+      - name: Publish versioned binaries and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir release
+          cp artifacts/agent-release-*/*.tar.gz release/
+          cmp artifacts/agent-release-amd64/install.sh artifacts/agent-release-arm64/install.sh
+          cp artifacts/agent-release-amd64/install.sh release/
+          cat artifacts/agent-release-*/SHA256SUMS > release/SHA256SUMS
+          (cd release && sha256sum -c SHA256SUMS)
+          gh release create "$GITHUB_REF_NAME" release/* --verify-tag --title "Blink Node $GITHUB_REF_NAME" --generate-notes

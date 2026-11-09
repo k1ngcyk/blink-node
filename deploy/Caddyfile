@@ -1,0 +1,35 @@
+{
+  servers {
+    timeouts {
+      read_header 10s
+      read_body 30s
+      idle 2m
+    }
+    max_header_size 32KB
+  }
+}
+{$BLINK_DOMAIN} {
+  header {
+    Strict-Transport-Security "max-age=31536000"
+    X-Content-Type-Options nosniff
+    X-Frame-Options DENY
+    Referrer-Policy no-referrer
+    -Server
+  }
+  request_body {
+    max_size 1MB
+  }
+  @gateway path /agent/enroll /ws/agent /ws/agent-terminal /ws/live /ws/terminal
+  handle @gateway {
+    reverse_proxy gateway:3001 {
+      header_up X-Blink-Client-IP {remote_host}
+      header_up -Forwarded
+    }
+  }
+  handle {
+    reverse_proxy web:3000 {
+      header_up X-Blink-Client-IP {remote_host}
+      header_up -Forwarded
+    }
+  }
+}

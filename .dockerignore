@@ -1,0 +1,9 @@
+.git
+.local
+.secrets
+.env*
+web/node_modules
+web/.next
+web/public/downloads
+agent/target
+**/*.log

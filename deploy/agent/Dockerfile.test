@@ -1,0 +1,16 @@
+FROM debian:bookworm-slim AS base
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 iputils-ping procps \
+    && rm -rf /var/lib/apt/lists/*
+COPY web/public/downloads /releases/downloads
+
+FROM base AS installer-test
+COPY web/tests/installer.py /test.py
+CMD ["python3", "/test.py"]
+
+FROM base AS agent
+ARG TARGETARCH
+ARG AGENT_VERSION=0.1.0
+RUN tar -xzf /releases/downloads/agent/v${AGENT_VERSION}/blink-agent-linux-${TARGETARCH}.tar.gz -C /usr/local/bin blink-agent \
+    && useradd --uid 10001 --user-group --create-home --home-dir /var/lib/blink-agent --shell /bin/sh blink-agent
+USER blink-agent
+ENTRYPOINT ["blink-agent"]

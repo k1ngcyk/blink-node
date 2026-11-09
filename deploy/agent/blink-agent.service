@@ -1,0 +1,38 @@
+[Unit]
+Description=Blink Node server monitoring agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=blink-agent
+Group=blink-agent
+ExecStart=/usr/local/bin/blink-agent --config /etc/blink-agent/config.toml run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
+StateDirectory=blink-agent
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CapabilityBoundingSet=
+AmbientCapabilities=
+TasksMax=128
+MemoryMax=192M
+ReadWritePaths=/var/lib/blink-agent
+
+[Install]
+WantedBy=multi-user.target

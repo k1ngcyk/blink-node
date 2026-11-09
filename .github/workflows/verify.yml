@@ -1,0 +1,42 @@
+name: Verify
+on: [push, pull_request]
+permissions: {contents: read}
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: web}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 24, cache: npm, cache-dependency-path: web/package-lock.json}
+      - run: npm ci
+      - run: npm run typecheck && npm run lint && npm test && npm run build
+      - run: npm audit --omit=dev --audit-level=moderate
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:integration
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-evidence
+          path: |
+            .local/integration-*/*.png
+            .local/integration-*/verification.json
+  agent:
+    strategy: {matrix: {runner: [ubuntu-24.04, ubuntu-24.04-arm]}}
+    runs-on: ${{ matrix.runner }}
+    defaults: {run: {working-directory: agent}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: {components: rustfmt, clippy}
+      - run: cargo fmt --check && cargo test --locked && cargo clippy --all-targets -- -D warnings
+      - run: cargo build --release --locked
+      - name: Package Linux binary
+        run: tar -czf blink-agent-linux-$(uname -m).tar.gz -C target/release blink-agent && sha256sum blink-agent-linux-*.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.runner }}
+          path: |
+            agent/blink-agent-linux-*.tar.gz
+            agent/SHA256SUMS

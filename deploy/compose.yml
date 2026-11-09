@@ -1,0 +1,136 @@
+name: blink-node
+x-app-env: &app-env
+  PUBLIC_URL: https://${BLINK_DOMAIN:?Set BLINK_DOMAIN in .env}
+  DATABASE_URL_FILE: /run/secrets/database_url
+  ENCRYPTION_KEY_FILE: /run/secrets/encryption_key
+  TRUST_PROXY: "true"
+  NODE_ENV: production
+x-app-security: &app-security
+  image: ${BLINK_IMAGE:-registry.windgyre.com/library/blink-node-web:0.1.0}
+  restart: unless-stopped
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ["/tmp:size=64m,mode=1777"]
+  pids_limit: 256
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+services:
+  postgres:
+    image: postgres:18-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_admin_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    secrets: [db_admin_password, db_app_password]
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./init-db.sql:/docker-entrypoint-initdb.d/10-blink.sql:ro
+    networks: [database]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    shm_size: 256mb
+    mem_limit: 2g
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  migrate:
+    <<: *app-security
+    restart: "no"
+    command: ["node", "--import", "tsx", "scripts/migrate.ts"]
+    environment: *app-env
+    secrets: [database_url, encryption_key]
+    networks: [database]
+    depends_on: {postgres: {condition: service_healthy}}
+  admin:
+    <<: *app-security
+    profiles: [setup]
+    restart: "no"
+    command: ["node", "--import", "tsx", "scripts/admin.ts"]
+    environment:
+      <<: *app-env
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      ADMIN_TOTP_SECRET_FILE: /run/secrets/admin_totp
+      RESET_ADMIN: ${RESET_ADMIN:-false}
+    secrets: [database_url, encryption_key, admin_password, admin_totp]
+    networks: [database]
+    depends_on: {migrate: {condition: service_completed_successfully}}
+  web:
+    <<: *app-security
+    environment:
+      <<: *app-env
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    secrets: [database_url, encryption_key]
+    networks: [frontend, database]
+    depends_on: {migrate: {condition: service_completed_successfully}}
+    mem_limit: 1g
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  gateway:
+    <<: *app-security
+    command: ["node", "--import", "tsx", "realtime/index.ts"]
+    environment:
+      <<: *app-env
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "3001"
+    secrets: [database_url, encryption_key]
+    networks: [frontend, database, egress]
+    depends_on: {migrate: {condition: service_completed_successfully}}
+    sysctls: {net.ipv4.ping_group_range: "0 2147483647"}
+    mem_limit: 1g
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3001/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment: {BLINK_DOMAIN: "${BLINK_DOMAIN:?Set BLINK_DOMAIN}"}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [frontend, egress]
+    depends_on: {web: {condition: service_healthy}, gateway: {condition: service_healthy}}
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    pids_limit: 128
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+networks:
+  frontend: {internal: true}
+  database: {internal: true}
+  egress: {}
+volumes:
+  postgres_data: {}
+  caddy_data: {}
+  caddy_config: {}
+secrets:
+  db_admin_password: {file: ../.secrets/db_admin_password}
+  db_app_password: {file: ../.secrets/db_app_password}
+  database_url: {file: ../.secrets/database_url}
+  encryption_key: {file: ../.secrets/encryption_key}
+  admin_password: {file: ../.secrets/admin_password}
+  admin_totp: {file: ../.secrets/admin_totp}

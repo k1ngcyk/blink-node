@@ -1,0 +1,12 @@
+server_url = "https://blink.example.com"
+state_file = "/var/lib/blink-agent/identity.json"
+spool_file = "/var/lib/blink-agent/spool.json"
+sample_seconds = 5
+# One hour of bounded offline buffering. On reboot only acknowledged data is discarded.
+max_spool_samples = 720
+diagnostics_enabled = true
+# Explicit opt-in: terminal runs as this local Unix user, never a browser-supplied user.
+terminal_enabled = false
+terminal_user = "blink-agent"
+allow_root_terminal = false
+allow_insecure_localhost = false

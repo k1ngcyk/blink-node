@@ -1,0 +1,22 @@
+FROM rust:1.92-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && rm -rf /var/lib/apt/lists/*
+ARG TARGETARCH
+RUN case "$TARGETARCH" in amd64) target=x86_64-unknown-linux-musl;; arm64) target=aarch64-unknown-linux-musl;; *) exit 1;; esac \
+    && printf '%s' "$target" > /rust-target && rustup target add "$target"
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+WORKDIR /src
+COPY agent/Cargo.toml agent/Cargo.lock ./
+COPY agent/src ./src
+RUN CC=musl-gcc cargo build --release --locked --target "$(cat /rust-target)" \
+    && cp "target/$(cat /rust-target)/release/blink-agent" /blink-agent
+COPY deploy/agent/blink-agent.service /package/blink-agent.service
+COPY deploy/agent/bootstrap.sh /install.sh.in
+RUN mkdir -p /out && cp /blink-agent /package/blink-agent \
+    && tar -czf /out/blink-agent-linux-${TARGETARCH}.tar.gz -C /package blink-agent blink-agent.service \
+    && version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1) \
+    && sed "s/@VERSION@/${version}/g" /install.sh.in > /out/install.sh
+WORKDIR /out
+RUN sha256sum blink-agent-linux-*.tar.gz > SHA256SUMS
+
+FROM scratch AS artifacts
+COPY --from=build /out/ /

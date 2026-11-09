@@ -1,0 +1,9 @@
+# Optional source build: compose -f deploy/compose.yml -f deploy/compose.build.yml build
+x-build: &build
+  context: ../web
+  target: runtime
+services:
+  web: {build: *build}
+  gateway: {build: *build}
+  migrate: {build: *build}
+  admin: {build: *build}
