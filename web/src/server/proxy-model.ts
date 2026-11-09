@@ -48,7 +48,7 @@ export const instanceInput = z
   })
   .superRefine((v, ctx) => {
     if (v.kind !== "shadowsocks2022" && !v.domain)
-      ctx.addIssue({ code: "custom", message: "入口需要域名" });
+      ctx.addIssue({ code: "custom", message: "TLS / 证书需要域名" });
     if (v.kind === "reality") {
       if (v.port !== 443) ctx.addIssue({ code: "custom", message: "REALITY 入口固定为 443" });
       try {
@@ -97,8 +97,29 @@ export const proxyStatus = z.object({
     .max(32)
     .default([]),
   ufw: z.string().max(12000).optional(),
+  ufwState: z.enum(["active", "inactive", "not_installed", "error"]).optional(),
+  checkedAt: z.iso.datetime().optional(),
+  network: z
+    .object({
+      checkedAt: z.iso.datetime(),
+      addresses: z
+        .array(
+          z.object({
+            address: z.string().max(45).refine(isPublicAddress, "需要有效的公网 IP"),
+            source: z.enum(["interface", "ip.sb"]),
+            interface: z.string().max(64).optional(),
+          }),
+        )
+        .max(2)
+        .refine(
+          (v) => new Set(v.map((a) => isIP(a.address))).size === v.length,
+          "每种地址族最多一个地址",
+        ),
+    })
+    .optional(),
   version: z.number().int().nonnegative().optional(),
 });
+export type ProxyStatus = z.infer<typeof proxyStatus>;
 export const proxyResult = z.object({
   type: z.literal("proxy.result"),
   v: z.literal(1),

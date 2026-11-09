@@ -540,9 +540,43 @@ try {
   await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 390, height: 844 });
   await sql`UPDATE servers SET info=info || '{"proxy":true}'::jsonb WHERE id=${enrollment.id}`;
+  const { receiveProxyStatus } = await import("../src/server/proxy");
+  await sql`INSERT INTO proxy_hosts(server_id) VALUES(${enrollment.id}) ON CONFLICT DO NOTHING`;
+  const nodeStatus = {
+    checkedAt: new Date().toISOString(),
+    network: {
+      checkedAt: new Date().toISOString(),
+      addresses: [
+        { address: "1.1.1.1", source: "interface", interface: "eth0" },
+        { address: "2606:4700::1111", source: "ip.sb" },
+      ],
+    },
+    ufwState: "active",
+    ufw: "Status: active\nDefault: deny (incoming), allow (outgoing)\n22/tcp ALLOW Anywhere",
+  };
+  await receiveProxyStatus(enrollment.id, nodeStatus);
   await page.goto(`${origin}/proxies`);
   await page.getByRole("combobox", { name: "代理服务器" }).selectOption(enrollment.id);
+  await waitFor(
+    () => page.getByLabel("公网 IP（IPv4 / IPv6）").inputValue(),
+    (value) => value === "1.1.1.1, 2606:4700::1111",
+  );
+  await page.getByText("已启用", { exact: true }).waitFor();
+  await page.getByText("查看 UFW 状态与规则", { exact: true }).click();
+  await page.getByText(/22\/tcp ALLOW Anywhere/).waitFor();
   await page.getByLabel("公网 IP（IPv4 / IPv6）").fill("8.8.8.8");
+  await receiveProxyStatus(enrollment.id, {
+    ...nodeStatus,
+    ufwState: "inactive",
+    ufw: "Status: inactive",
+  });
+  await page.getByText("未启用", { exact: true }).waitFor();
+  assert.equal(
+    await page.getByLabel("公网 IP（IPv4 / IPv6）").inputValue(),
+    "8.8.8.8",
+    "status polling preserves unsaved address edits",
+  );
+  await page.screenshot({ path: resolve(dir, "proxy-network-mobile.png") });
   const hostSaved = page.waitForResponse(
     (r) =>
       r.url().endsWith(`/api/proxy/hosts/${enrollment.id}`) && r.request().method() === "PATCH",
@@ -566,6 +600,7 @@ try {
   await page.getByRole("button", { name: "安装并应用", exact: true }).click();
   await page.getByRole("dialog").waitFor({ state: "hidden" });
   await page.getByRole("cell", { name: /浏览器测试出口/ }).waitFor();
+  await page.getByRole("cell", { name: "8.8.8.8:8388", exact: true }).waitFor();
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.screenshot({ path: resolve(dir, "proxy-desktop.png") });
   await page.setViewportSize({ width: 390, height: 844 });

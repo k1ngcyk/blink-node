@@ -386,9 +386,14 @@ export async function proxyApi(
   throw new HttpError(404, "代理接口不存在");
 }
 
-export async function receiveProxyStatus(serverId: string, value: unknown) {
+async function saveProxyStatus(tx: DB, serverId: string, value: unknown) {
   const status = proxyStatus.parse(value);
-  await sql`UPDATE proxy_hosts SET observed=${sql.json(status)} WHERE server_id=${serverId}`;
+  const addresses = status.network?.addresses.map((item) => item.address) ?? [];
+  // Seed only an empty host. Later observations never change saved DNS/ACL inputs.
+  await tx`UPDATE proxy_hosts SET observed=${tx.json(status)},addresses=CASE WHEN cardinality(addresses)=0 THEN ${addresses}::text[] ELSE addresses END WHERE server_id=${serverId}`;
+}
+export async function receiveProxyStatus(serverId: string, value: unknown) {
+  await saveProxyStatus(sql, serverId, value);
 }
 export async function receiveProxyResult(serverId: string, message: z.infer<typeof proxyResult>) {
   const serialized = JSON.stringify(message.result);
@@ -422,13 +427,15 @@ export async function receiveProxyResult(serverId: string, message: z.infer<type
         )
         .max(100)
         .parse(message.result.discoveries ?? []);
-      await tx`UPDATE proxy_hosts SET scanned_at=now(),encrypted_scan=${encrypt(serialized)},observed=${tx.json(proxyStatus.parse(message.result.status ?? {}))} WHERE server_id=${serverId}`;
+      await saveProxyStatus(tx, serverId, message.result.status ?? {});
+      await tx`UPDATE proxy_hosts SET scanned_at=now(),encrypted_scan=${encrypt(serialized)} WHERE server_id=${serverId}`;
       for (const item of discoveries)
         await tx`INSERT INTO proxy_imports(server_id,source_key,summary,encrypted_snapshot) VALUES(${serverId},${item.key},${tx.json(item.summary as never)},${encrypt(JSON.stringify(item.configuration))}) ON CONFLICT(server_id,source_key) DO UPDATE SET summary=excluded.summary,encrypted_snapshot=excluded.encrypted_snapshot,updated_at=now()`;
     }
     if (job.operation === "apply") {
       if (message.ok) {
-        await tx`UPDATE proxy_hosts SET applied_version=${message.desiredVersion},observed=${tx.json(proxyStatus.parse(message.result.status ?? {}))} WHERE server_id=${serverId}`;
+        await saveProxyStatus(tx, serverId, message.result.status ?? {});
+        await tx`UPDATE proxy_hosts SET applied_version=${message.desiredVersion} WHERE server_id=${serverId}`;
         await tx`DELETE FROM proxy_instances WHERE server_id=${serverId} AND state='deleting'`;
       }
       await tx`UPDATE proxy_instances SET state=CASE WHEN ${message.ok} THEN CASE WHEN spec->>'enabled'='false' THEN 'disabled' ELSE 'active' END ELSE 'failed' END,error=${message.ok ? null : error} WHERE server_id=${serverId} AND state<>'deleting'`;

@@ -7,6 +7,7 @@ import {
   credentials,
   redact,
   referencedExits,
+  proxyStatus,
 } from "../src/server/proxy-model";
 
 const serverId = "7f305991-cab7-4ada-a4b3-6f8d5626c7ef";
@@ -52,6 +53,27 @@ test("host addresses reject private IPs and duplicate address families", () => {
   assert(hostInput.safeParse({ addresses: ["8.8.8.8", "2606:4700::1111"] }).success);
   for (const addresses of [["127.0.0.1"], ["169.254.169.254"], ["8.8.8.8", "1.1.1.1"]])
     assert(!hostInput.safeParse({ addresses }).success);
+});
+test("node observations validate public addresses and UFW state while accepting older managers", () => {
+  assert(proxyStatus.safeParse({ ufw: "Status: inactive" }).success);
+  const network = {
+    checkedAt: new Date().toISOString(),
+    addresses: [
+      { address: "8.8.8.8", source: "interface", interface: "eth0" },
+      { address: "2606:4700::1111", source: "ip.sb" },
+    ],
+  };
+  assert(proxyStatus.safeParse({ network, ufwState: "not_installed" }).success);
+  for (const addresses of [
+    [{ address: "127.0.0.1", source: "ip.sb" }],
+    [{ address: "example.com", source: "interface" }],
+    [
+      { address: "8.8.8.8", source: "interface" },
+      { address: "1.1.1.1", source: "ip.sb" },
+    ],
+  ])
+    assert(!proxyStatus.safeParse({ network: { ...network, addresses } }).success);
+  assert(!proxyStatus.safeParse({ ufwState: "enabled" }).success);
 });
 test("generated REALITY keypair and SS2022 key lengths are interoperable", () => {
   const secret = credentials("reality");

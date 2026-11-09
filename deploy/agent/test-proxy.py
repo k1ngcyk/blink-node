@@ -34,6 +34,67 @@ def fixture():
 
 
 class ProxyTests(unittest.TestCase):
+    def test_public_addresses_prefer_routed_stable_interfaces(self):
+        interfaces = [
+            {'ifname': 'eth1', 'addr_info': [{'local': '1.1.1.1', 'scope': 'global'}]},
+            {'ifname': 'eth0', 'addr_info': [
+                {'local': '8.8.8.8', 'scope': 'global'},
+                {'local': '8.8.4.4', 'scope': 'global'},
+                {'local': '10.0.0.1', 'scope': 'global'},
+                {'local': '2606:4700::1001', 'scope': 'global', 'temporary': True},
+                {'local': '2606:4700::1002', 'scope': 'global', 'flags': ['tentative']},
+                {'local': '2606:4700::1003', 'scope': 'global', 'preferred_life_time': 0},
+                {'local': '2606:4700::1111', 'scope': 'global'},
+                {'local': 'fe80::1', 'scope': 'link'},
+            ]},
+        ]
+        def command(args, **kwargs):
+            self.assertEqual(args[0], 'ip', 'public interfaces do not need external lookup')
+            if 'address' in args:
+                return json.dumps(interfaces)
+            return json.dumps([{'dev': 'eth0', 'prefsrc': '8.8.4.4' if '-4' in args else '2606:4700::1001'}])
+        with patch.object(m, 'ADDRESS_CACHE', None), patch.object(m, 'run', side_effect=command) as run:
+            result = m.public_addresses()
+            self.assertEqual(result['addresses'], [
+                {'address': '8.8.4.4', 'source': 'interface', 'interface': 'eth0'},
+                {'address': '2606:4700::1111', 'source': 'interface', 'interface': 'eth0'},
+            ])
+            self.assertEqual(m.public_addresses(), result)
+            self.assertEqual(run.call_count, 3, 'periodic reporting reuses address discovery')
+            m.public_addresses(refresh=True)
+            self.assertEqual(run.call_count, 6, 'manual scan refreshes discovery')
+
+    def test_public_addresses_use_direct_family_specific_lookup_for_nat(self):
+        def command(args, **kwargs):
+            if args[0] == 'ip':
+                return json.dumps([{'ifname': 'eth0', 'addr_info': [{'local': '192.168.1.2', 'scope': 'global'}]}]) if 'address' in args else '[]'
+            self.assertEqual(args[0:2], ['curl', '--disable'])
+            self.assertEqual(args[args.index('--noproxy') + 1], '*')
+            self.assertEqual(args[-1], 'https://api.ip.sb/ip')
+            self.assertLessEqual(kwargs['timeout'], 6)
+            return '9.9.9.9\n' if '-4' in args else '2606:4700::1111\n'
+        with patch.object(m, 'ADDRESS_CACHE', None), patch.object(m, 'run', side_effect=command):
+            self.assertEqual(m.public_addresses()['addresses'], [
+                {'address': '9.9.9.9', 'source': 'ip.sb'},
+                {'address': '2606:4700::1111', 'source': 'ip.sb'},
+            ])
+
+    def test_public_address_lookup_failures_never_fill_invalid_addresses(self):
+        for ipv4, ipv6 in [('', ''), ('<html>error</html>', '127.0.0.1'), ('2606:4700::1111', '8.8.8.8'), ('100.64.0.1', 'fd00::1')]:
+            def command(args, **kwargs):
+                return '' if args[0] == 'ip' else ipv4 if '-4' in args else ipv6
+            with self.subTest(ipv4=ipv4, ipv6=ipv6), patch.object(m, 'ADDRESS_CACHE', None), patch.object(m, 'run', side_effect=command):
+                self.assertEqual(m.public_addresses()['addresses'], [])
+
+    def test_ufw_status_distinguishes_missing_disabled_active_and_failed(self):
+        with patch.object(m.shutil, 'which', return_value=None), patch.object(m, 'run') as run:
+            self.assertEqual(m.ufw_status(), {'ufwState': 'not_installed', 'ufw': ''})
+            run.assert_not_called()
+        for text, state in [('Status: active\nDefault: deny (incoming)\n443/tcp ALLOW Anywhere\n', 'active'), ('Status: inactive\n', 'inactive'), ('', 'error')]:
+            with patch.object(m.shutil, 'which', return_value='/usr/sbin/ufw'), patch.object(m, 'run', return_value=text) as run:
+                self.assertEqual(m.ufw_status(), {'ufwState': state, 'ufw': text})
+                self.assertEqual(run.call_args.args[0], ['ufw', 'status', 'verbose'])
+
     def test_reality_local_tls_and_proxy_v2(self):
         item = fixture()
         data = {'instances': [item], 'addresses': ['8.8.8.8'], 'firewall': 'existing', 'email': 'test@example.test'}

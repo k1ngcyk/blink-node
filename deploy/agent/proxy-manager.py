@@ -42,6 +42,7 @@ CONTROL = '/run/blink-proxy/control.sock'
 ADMIN = 'unix//run/blink-proxy-web/admin.sock'
 LIMIT = 220000
 LOCK = threading.Lock()
+ADDRESS_CACHE = None
 DOMAIN = re.compile(r'(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$')
 
 
@@ -121,6 +122,59 @@ def public_ip(value):
         return address.is_global and not address.is_multicast
     except ValueError:
         return False
+
+
+def public_addresses(refresh=False):
+    """Prefer stable addresses on the routed interface; use direct HTTPS for NAT."""
+    global ADDRESS_CACHE
+    if not refresh and ADDRESS_CACHE and time.monotonic() - ADDRESS_CACHE[0] < 300:
+        return ADDRESS_CACHE[1]
+    try:
+        interfaces = json.loads(run(['ip', '-j', 'address', 'show', 'up'], timeout=5, optional=True))
+        if not isinstance(interfaces, list):
+            interfaces = []
+    except ValueError:
+        interfaces = []
+    addresses = []
+    for family, target in ((4, '1.1.1.1'), (6, '2606:4700:4700::1111')):
+        try:
+            routes = json.loads(run(['ip', '-j', '-' + str(family), 'route', 'get', target], timeout=5, optional=True))
+            route = routes[0] if isinstance(routes, list) and routes else {}
+        except ValueError:
+            route = {}
+        candidates = []
+        for interface in interfaces:
+            name = interface.get('ifname', '')
+            for entry in interface.get('addr_info', []):
+                address = entry.get('local', '')
+                flags = set(entry.get('flags', []))
+                if (entry.get('scope') != 'global' or not public_ip(address)
+                        or ipaddress.ip_address(address).version != family
+                        or any(flag in flags or entry.get(flag) is True for flag in ('temporary', 'deprecated', 'tentative', 'dadfailed'))
+                        or entry.get('valid_life_time') == 0 or entry.get('preferred_life_time') == 0):
+                    continue
+                candidates.append((name != route.get('dev'), address != route.get('prefsrc', route.get('src')), name, str(ipaddress.ip_address(address))))
+        if candidates:
+            _, _, name, address = min(candidates)
+            addresses.append({'address': address, 'source': 'interface', 'interface': name[:64]})
+            continue
+        # Ignore proxy environment/configuration: this must report the node's IP.
+        value = run(['curl', '--disable', '--fail', '--silent', '--show-error', '--noproxy', '*',
+                     '--proto', '=https', '--connect-timeout', '3', '--max-time', '5', '--max-filesize', '128',
+                     '-' + str(family), 'https://api.ip.sb/ip'], timeout=6, optional=True).strip()
+        if len(value) <= 45 and public_ip(value) and ipaddress.ip_address(value).version == family:
+            addresses.append({'address': str(ipaddress.ip_address(value)), 'source': 'ip.sb'})
+    result = {'addresses': addresses, 'checkedAt': datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')}
+    ADDRESS_CACHE = (time.monotonic(), result)
+    return result
+
+
+def ufw_status():
+    if not shutil.which('ufw'):
+        return {'ufwState': 'not_installed', 'ufw': ''}
+    output = run(['ufw', 'status', 'verbose'], timeout=5, optional=True)[:12000]
+    match = re.search(r'^Status:\s*(active|inactive)\s*$', output, re.M)
+    return {'ufwState': match[1] if match else 'error', 'ufw': output}
 
 
 def validate_payload(data):
@@ -646,7 +700,7 @@ def apply(data, version, deadline):
         raise
 
 
-def status(data=None):
+def status(data=None, refresh_network=False):
     if data is None:
         data = read_json(ROOT / 'current' / 'desired.json', {'instances': []})
     items = []
@@ -657,7 +711,8 @@ def status(data=None):
         if source:
             row['certificate'] = certificate_info(source[0])
         items.append(row)
-    return {'instances': items, 'ufw': run(['ufw', 'status'], optional=True)[:12000],
+    return {'instances': items, **ufw_status(), 'network': public_addresses(refresh_network),
+            'checkedAt': datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z'),
             'version': read_json(PRIVATE / 'applied.json', {'version': 0})['version']}
 
 
@@ -895,7 +950,7 @@ def scan():
         if targets:
             item['summary']['localWebCandidates'] = [d['key'] for d in discoveries
                 if targets.intersection(d['summary'].get('listenPorts', []))]
-    result = {'discoveries': [], 'warnings': warnings, 'status': status()}
+    result = {'discoveries': [], 'warnings': warnings, 'status': status(refresh_network=True)}
     for item in discoveries[:100]:
         result['discoveries'].append(item)
         if len(canonical(result)) > 200000:
@@ -960,7 +1015,6 @@ class Handler(socketserver.BaseRequestHandler):
 
 def maintain():
     while True:
-        time.sleep(60)
         if LOCK.acquire(blocking=False):
             try:
                 data = read_json(ROOT / 'current' / 'desired.json', {'instances': []})
@@ -974,6 +1028,7 @@ def maintain():
                 print('Proxy certificate synchronization failed', file=sys.stderr, flush=True)
             finally:
                 LOCK.release()
+        time.sleep(60)
 
 
 def main():

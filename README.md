@@ -218,7 +218,9 @@ ICMP 依赖系统 `ping` 命令与允许的 ping socket 权限；必要时为服
 
 ## 代理服务
 
-在“设置 → 代理节点 · DNS 与证书”保存限定 Zone 的 Cloudflare Token（Zone Read + DNS Edit）与 ACME 邮箱，然后在“代理服务”中选择节点，保存公网 IP 和防火墙策略。
+在“设置 → 代理节点 · DNS 与证书”保存限定 Zone 的 Cloudflare Token（Zone Read + DNS Edit）与 ACME 邮箱，然后在“代理服务”中选择节点，确认公网 IP 和防火墙策略。
+
+节点通过 `ip -j address` 识别公网 IPv4/IPv6，优先使用路由网卡的稳定地址；缺少对应地址族时使用直连 `curl -4/-6 https://api.ip.sb/ip` 探测出口。首次探测自动填充空地址，后续不会覆盖已保存的地址。地址探测缓存 5 分钟，“刷新节点扫描”立即重新探测。客户端连接地址始终为 IP，证书域名仅用于 TLS / SNI；NAT 节点需核对公网入站映射。
 
 先在落地节点安装 **Shadowsocks 2022**，再在入口节点安装 **AnyTLS** 或 **VLESS · REALITY / Vision**，选择默认出口；规则按列表顺序匹配完整域名、域名后缀或 IP/CIDR，支持指定其他 SS2022 出口或直接出网。出口失效时链路失败，不自动改走直连。入口和落地都需要在面板中管理。
 
@@ -239,6 +241,8 @@ ICMP 依赖系统 `ping` 命令与允许的 ping socket 权限；必要时为服
 存量 Master 升级时同步更新 `deploy/compose.yml`，让 Web 服务接入 `egress` 网络，以访问 Cloudflare API 和解析伪装上游域名。
 
 默认仅管理已启用的 UFW；选择安装启用时会保留配置及实际监听的 SSH 端口。SS2022 仅为已关联入口的公网地址添加规则。已有管理员规则不接管；云安全组需同步配置。外部防火墙模式由管理员维护访问规则。
+
+面板展示 UFW 实际状态（已启用、未启用、未安装、读取失败）和 `ufw status verbose` 规则详情，每分钟更新并标明采集时间；该状态与所选择的防火墙策略分别展示。
 
 ### 扫描、部署与恢复
 

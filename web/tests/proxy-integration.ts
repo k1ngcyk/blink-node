@@ -44,7 +44,7 @@ try {
   }
   for (const file of (await readdir("drizzle")).filter((f) => f.endsWith(".sql")).sort())
     await sql.unsafe(await readFile(`drizzle/${file}`, "utf8"));
-  const { proxyApi, initialProxyScan, dispatchProxy, receiveProxyResult } =
+  const { proxyApi, initialProxyScan, dispatchProxy, receiveProxyResult, receiveProxyStatus } =
     await import("../src/server/proxy");
   const { decrypt } = await import("../src/server/crypto");
   const user = {
@@ -108,7 +108,17 @@ try {
         configuration: { password: rawSecret, port: 443 },
       },
     ],
-    status: {},
+    status: {
+      network: {
+        checkedAt: new Date().toISOString(),
+        addresses: [
+          { address: "8.8.4.4", source: "interface", interface: "eth0" },
+          { address: "2606:4700::1111", source: "ip.sb" },
+        ],
+      },
+      ufwState: "active",
+      ufw: "Status: active\n443/tcp ALLOW Anywhere",
+    },
   };
   await receiveProxyResult(stranger, {
     type: "proxy.result",
@@ -124,11 +134,37 @@ try {
     "another agent cannot complete scan",
   );
   await complete(scan, imported);
+  const detectedHost = await api(`hosts/${entry}`);
+  assert.deepEqual(
+    detectedHost.addresses,
+    ["8.8.4.4", "2606:4700::1111"],
+    "initial scan fills public addresses",
+  );
+  assert.equal(detectedHost.observed.ufwState, "active");
+  await sql`INSERT INTO proxy_hosts(server_id) VALUES(${stranger})`;
+  await receiveProxyStatus(stranger, imported.status);
+  assert.deepEqual(
+    (await api(`hosts/${stranger}`)).addresses,
+    detectedHost.addresses,
+    "periodic status fills existing empty hosts",
+  );
   const [record] = await sql`SELECT * FROM proxy_imports`;
   assert(!record.encrypted_snapshot.includes(rawSecret));
   assert(JSON.stringify(await api(`imports/${record.id}`)).includes("••••••••"));
   assert(!JSON.stringify(await api(`imports/${record.id}`)).includes(rawSecret));
   await api(`hosts/${entry}`, "PATCH", { addresses: ["8.8.8.8"], firewall: "existing" });
+  await receiveProxyStatus(entry, {
+    ...imported.status,
+    ufwState: "inactive",
+    ufw: "Status: inactive",
+  });
+  const manualHost = await api(`hosts/${entry}`);
+  assert.deepEqual(
+    manualHost.addresses,
+    ["8.8.8.8"],
+    "observations never overwrite saved addresses",
+  );
+  assert.equal(manualHost.observed.ufwState, "inactive");
   await api(`hosts/${exit}`, "PATCH", { addresses: ["1.1.1.1"], firewall: "existing" });
   await sql`UPDATE proxy_settings SET acme_email='test@example.com' WHERE id=1`;
   const ss = await api("instances", "POST", {

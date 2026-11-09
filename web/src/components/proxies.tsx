@@ -4,7 +4,7 @@ import { useState } from "react";
 import { IconPlus, IconRefresh, IconNetwork } from "@tabler/icons-react";
 import { api, useResource } from "@/lib/client";
 import type { Server } from "@/lib/types";
-import type { ProxySpec } from "@/server/proxy-model";
+import type { ProxySpec, ProxyStatus } from "@/server/proxy-model";
 import { when } from "@/lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -42,7 +42,7 @@ type Host = {
   desired_version?: number;
   applied_version?: number;
   scanned_at?: string;
-  observed?: { instances?: { id: string; state: string; certificate?: { notAfter?: string } }[] };
+  observed?: ProxyStatus;
   imports: Imported[];
   jobs: {
     id: string;
@@ -67,6 +67,12 @@ const states: Record<string, string> = {
   running: "执行中",
   done: "完成",
 };
+const ufwStates: Record<string, string> = {
+  active: "已启用",
+  inactive: "未启用",
+  not_installed: "未安装",
+  error: "读取失败",
+};
 
 export function Proxies({ serverId }: { serverId?: string }) {
   const servers = useResource<Server[]>("servers", 10000),
@@ -75,7 +81,12 @@ export function Proxies({ serverId }: { serverId?: string }) {
     [editing, setEditing] = useState<Instance | "new" | null>(null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
-    [detail, setDetail] = useState<{ title: string; value: unknown } | null>(null);
+    [detail, setDetail] = useState<{ title: string; value: unknown } | null>(null),
+    [hostDraft, setHostDraft] = useState<{
+      id: string;
+      addresses: string;
+      firewall: string;
+    } | null>(null);
   const selectedId = serverId || selected || servers.data?.[0]?.id;
   const server = servers.data?.find((s) => s.id === selectedId);
   const resource = useResource<Host & { server_id: string }>(
@@ -88,6 +99,13 @@ export function Proxies({ serverId }: { serverId?: string }) {
   };
   const local = instances.data?.filter((i) => i.server_id === selectedId) ?? [];
   const jobsRunning = host.data?.jobs.some((j) => ["queued", "running"].includes(j.state));
+  const draft = hostDraft?.id === selectedId ? hostDraft : null;
+  const addressValue = draft?.addresses ?? host.data?.addresses.join(", ") ?? "";
+  const firewallValue = draft?.firewall ?? host.data?.firewall ?? "existing";
+  const observed = host.data?.observed;
+  const ufwState =
+    observed?.ufwState ?? observed?.ufw?.match(/^Status:\s*(active|inactive)\s*$/m)?.[1];
+  const ufwLabel = ufwStates[ufwState ?? ""] ?? "等待节点上报";
   async function act(action: () => Promise<unknown>) {
     setBusy(true);
     setError("");
@@ -139,7 +157,7 @@ export function Proxies({ serverId }: { serverId?: string }) {
             onClick={() => void act(() => api(`proxy/hosts/${selectedId}/scan`, "POST", {}))}
           >
             <IconRefresh size={15} />
-            扫描已有配置
+            刷新节点扫描
           </Button>
           <Button
             disabled={!host.data || !server?.info.proxy || busy || jobsRunning}
@@ -165,19 +183,21 @@ export function Proxies({ serverId }: { serverId?: string }) {
             </small>
           </div>
           <form
-            key={`${selectedId}:${host.data?.addresses.join(",")}:${host.data?.firewall}`}
+            key={selectedId}
             className="panel-body"
             onSubmit={(e) => {
               e.preventDefault();
               const f = new FormData(e.currentTarget);
-              void act(() =>
-                api(`proxy/hosts/${selectedId}`, "PATCH", {
+              void act(async () => {
+                await api(`proxy/hosts/${selectedId}`, "PATCH", {
                   addresses: String(f.get("addresses"))
                     .split(/[\s,]+/)
                     .filter(Boolean),
                   firewall: f.get("firewall"),
-                }),
-              );
+                });
+                await host.refresh();
+                setHostDraft((current) => (current?.id === selectedId ? null : current));
+              });
             }}
           >
             <div className="form-grid">
@@ -185,19 +205,51 @@ export function Proxies({ serverId }: { serverId?: string }) {
                 公网 IP（IPv4 / IPv6）
                 <Input
                   name="addresses"
-                  disabled={!host.data}
-                  defaultValue={host.data?.addresses.join(", ")}
+                  disabled={!host.data || busy}
+                  value={addressValue}
+                  onChange={(e) =>
+                    setHostDraft({
+                      id: selectedId,
+                      addresses: e.target.value,
+                      firewall: firewallValue,
+                    })
+                  }
                   placeholder="每种地址族一个，逗号分隔"
                   required
                 />
-                <small>用于 DNS、SS2022 连接及入口来源放行。填写实际公网出口地址。</small>
+                <small>
+                  自动识别节点公网 IP，可手动调整。客户端使用 IP 连接，域名仅用于 TLS / SNI。
+                </small>
+                {observed?.network?.addresses.map((item) => (
+                  <small key={item.address}>
+                    <span className="mono">{item.address}</span> ·{" "}
+                    {item.source === "interface"
+                      ? `${item.interface || "网卡"} / ip a`
+                      : "ip.sb 出口探测"}
+                  </small>
+                ))}
+                {observed?.network && (
+                  <small>
+                    {observed.network.addresses.length
+                      ? "地址探测"
+                      : "未探测到公网 IP，请手动填写或刷新扫描"}{" "}
+                    · {when(observed.network.checkedAt)}
+                  </small>
+                )}
               </label>
               <label className="field">
                 防火墙策略
                 <select
                   name="firewall"
-                  disabled={!host.data}
-                  defaultValue={host.data?.firewall || "existing"}
+                  disabled={!host.data || busy}
+                  value={firewallValue}
+                  onChange={(e) =>
+                    setHostDraft({
+                      id: selectedId,
+                      addresses: addressValue,
+                      firewall: e.target.value,
+                    })
+                  }
                 >
                   <option value="existing">管理已启用的 UFW</option>
                   <option value="enable">安装并启用 UFW（自动保留 SSH）</option>
@@ -205,6 +257,37 @@ export function Proxies({ serverId }: { serverId?: string }) {
                 </select>
                 <small>云厂商安全组需单独放行；HTTP-01 需要 TCP 80。</small>
               </label>
+            </div>
+            <div className="stack mt-4 border-t pt-4">
+              <div className="row between">
+                <div className="row text-sm">
+                  <span>UFW 实际状态</span>
+                  <strong
+                    className={
+                      ufwState === "active"
+                        ? "success"
+                        : ufwState === "error"
+                          ? "error-text"
+                          : "muted"
+                    }
+                  >
+                    {ufwLabel}
+                  </strong>
+                </div>
+                <small className="muted">
+                  {observed?.checkedAt
+                    ? `更新于 ${when(observed.checkedAt)}`
+                    : "刷新节点扫描可获取最新状态"}
+                </small>
+              </div>
+              {observed?.ufw && (
+                <details className="text-sm">
+                  <summary className="cursor-pointer muted">查看 UFW 状态与规则</summary>
+                  <pre className="code-block mt-3 whitespace-pre-wrap break-all">
+                    {observed.ufw}
+                  </pre>
+                </details>
+              )}
             </div>
             <div className="form-actions">
               <Button
@@ -254,7 +337,14 @@ export function Proxies({ serverId }: { serverId?: string }) {
                       <span className="subline">{names[item.kind]}</span>
                     </td>
                     <td className="mono">
-                      {item.spec.domain || host.data?.addresses[0]}:{item.spec.port}
+                      {host.data?.addresses.length
+                        ? host.data.addresses.map((address) => (
+                            <span className="block" key={address}>
+                              {address.includes(":") ? `[${address}]` : address}:{item.spec.port}
+                            </span>
+                          ))
+                        : "等待公网 IP"}
+                      {item.spec.domain && <span className="subline">SNI：{item.spec.domain}</span>}
                       {observed?.certificate?.notAfter && (
                         <span className="subline">证书至 {observed.certificate.notAfter}</span>
                       )}
@@ -305,7 +395,8 @@ export function Proxies({ serverId }: { serverId?: string }) {
                                 title: `${item.name} · 客户端配置`,
                                 value: {
                                   protocol: item.kind,
-                                  server: item.spec.domain || host.data?.addresses[0],
+                                  server: host.data?.addresses[0],
+                                  addresses: host.data?.addresses,
                                   port: item.spec.port,
                                   serverName: item.spec.domain,
                                   ...(item.kind === "reality"
@@ -593,13 +684,14 @@ function ProxyForm({
         </label>
         {kind !== "shadowsocks2022" && (
           <label className="field">
-            节点域名
+            证书域名 / SNI
             <Input
               name="domain"
               placeholder="hk01.example.com"
               required
               defaultValue={instance?.spec.domain}
             />
+            <small>用于证书验证和 TLS 握手，客户端连接地址为节点公网 IP。</small>
           </label>
         )}
         {kind === "reality" && (
