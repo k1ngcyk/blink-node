@@ -23,6 +23,15 @@ const port = (listener.address() as net.AddressInfo).port;
 await new Promise<void>((r) => listener.close(() => r()));
 const origin = `https://localhost:${port}`;
 const env = { ...process.env, BLINK_DOMAIN: "localhost" };
+const buildProxy = Object.fromEntries(
+  ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"]
+    .filter((name) => process.env[name])
+    .map((name) => [name, process.env[name]]),
+);
+if (process.env.BLINK_BUILD_PROXY) {
+  buildProxy.HTTP_PROXY = process.env.BLINK_BUILD_PROXY;
+  buildProxy.HTTPS_PROXY = process.env.BLINK_BUILD_PROXY;
+}
 const password = randomBytes(32).toString("hex");
 const appPassword = randomBytes(32).toString("hex");
 const totpSecret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
@@ -67,8 +76,13 @@ for (const [name, value] of Object.entries(values)) {
 }
 for (const name of ["web", "gateway", "migrate", "admin"]) {
   base.services[name].environment.PUBLIC_URL = origin;
-  base.services[name].image = `${project}-runtime`;
-  base.services[name].build = { context: resolve(root, "web"), target: "runtime" };
+  base.services[name].image = process.env.BLINK_TEST_IMAGE || `${project}-runtime`;
+  if (!process.env.BLINK_TEST_IMAGE)
+    base.services[name].build = {
+      context: resolve(root, "web"),
+      target: "runtime",
+      args: buildProxy,
+    };
 }
 base.services.caddy.ports = [
   { target: 443, published: String(port), host_ip: "127.0.0.1", protocol: "tcp" },
@@ -92,7 +106,7 @@ base.services.agent = {
     context: root,
     dockerfile: "deploy/agent/Dockerfile.test",
     target: "agent",
-    args: { AGENT_VERSION: agentVersion },
+    args: { ...buildProxy, AGENT_VERSION: agentVersion },
   },
   network_mode: "service:gateway",
   command: ["--config", "/etc/blink.toml", "run"],

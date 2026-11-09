@@ -7,7 +7,7 @@ ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc CARGO_TARGET_AARCH64_
 WORKDIR /src
 COPY agent/Cargo.toml agent/Cargo.lock ./
 COPY agent/src ./src
-RUN CC=musl-gcc cargo build --release --locked --target "$(cat /rust-target)" \
+RUN --mount=type=cache,target=/usr/local/cargo/registry CC=musl-gcc cargo build --release --locked --target "$(cat /rust-target)" \
     && cp "target/$(cat /rust-target)/release/blink-agent" /blink-agent
 COPY deploy/agent/blink-agent.service /package/blink-agent.service
 COPY deploy/agent/bootstrap.sh /install.sh.in

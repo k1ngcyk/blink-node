@@ -2,12 +2,13 @@
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$root/agent/Cargo.toml" | head -1)
-web_version=$(node -p "require(process.argv[1]).version" "$root/web/package.json")
+web_version=$(sed -n 's/^  "version": "\([^"]*\)".*/\1/p' "$root/web/package.json" | head -1)
 [[ "$version" == "$web_version" ]] || { echo 'Agent and Web versions must match.' >&2; exit 1; }
 mkdir -p "$root/.local"
 work=$(mktemp -d "$root/.local/agent-release.XXXXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 docker buildx build --platform linux/amd64,linux/arm64 --target artifacts \
+  --build-arg "HTTP_PROXY=${BLINK_BUILD_PROXY:-${HTTP_PROXY:-}}" --build-arg "HTTPS_PROXY=${BLINK_BUILD_PROXY:-${HTTPS_PROXY:-}}" --build-arg NO_PROXY \
   -f "$root/agent/Dockerfile.release" --output "type=local,dest=$work" "$root"
 out="$root/web/public/downloads/agent/v$version"
 mkdir -p "$out"

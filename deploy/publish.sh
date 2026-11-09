@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-version=$(node -p "require(process.argv[1]).version" "$root/web/package.json")
+version=$(sed -n 's/^  "version": "\([^"]*\)".*/\1/p' "$root/web/package.json" | head -1)
 image=registry.windgyre.com/library/blink-node-web
 git -C "$root" diff --quiet && git -C "$root" diff --cached --quiet || { echo 'Commit source changes before publishing.' >&2; exit 1; }
 bash "$root/deploy/build-agent.sh"
+revision=$(git -C "$root" rev-parse HEAD)
 docker buildx build --platform linux/amd64,linux/arm64 --target runtime \
-  --label "org.opencontainers.image.source=https://github.com/k1ngcyk/blink-node" \
+  --build-arg "HTTP_PROXY=${BLINK_BUILD_PROXY:-${HTTP_PROXY:-}}" --build-arg "HTTPS_PROXY=${BLINK_BUILD_PROXY:-${HTTPS_PROXY:-}}" --build-arg NO_PROXY \
+  --label "org.opencontainers.image.source=${CI_PROJECT_URL:-https://git.magipop.xyz/blink/blink-node}" \
   --label "org.opencontainers.image.version=$version" \
-  --label "org.opencontainers.image.revision=$(git -C "$root" rev-parse HEAD)" \
-  -t "$image:$version" -t "$image:latest" --push "$root/web"
+  --label "org.opencontainers.image.revision=$revision" \
+  --metadata-file "$root/.local/publish-metadata.json" \
+  -t "$image:$version" -t "$image:latest" -t "$image:$revision" --push "$root/web"

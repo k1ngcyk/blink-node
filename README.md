@@ -213,11 +213,29 @@ Docker 验证会构建真实镜像，使用临时 CA 和回环 HTTPS 端口，�
 数据库最小权限、非 root Linux Agent、PTY 和子进程清理；结束后删除测试项目自身的容器与卷。
 本地测试的 HTTP / localhost 模式只用于开发，不应用于公网。
 
-构建和验证均在本地执行；仓库不包含 GitHub Actions 工作流。
+可在本地或 GitLab runner 上构建和验证；仓库不包含 GitHub Actions 工作流。
 
 ## 构建和发布
 
-代码仓库：`git@github.com:k1ngcyk/blink-node.git`。
+主仓库：`git@git.magipop.xyz:blink/blink-node.git`。
+GitHub 镜像：`git@github.com:k1ngcyk/blink-node.git`。
+
+### GitLab Runner 自动构建
+
+`.gitlab-ci.yml` 使用与 eduhub-web 相同的 **`build`** 标签（当前对应 runner #12），
+复用 runner 已有的 Docker 和镜像仓库登录。推送 `main` 后自动执行：
+
+- Web 类型检查、lint、安全单测；
+- 构建两种架构的 musl Agent，测试安装、权限和失败回滚；
+- 构建统一运行镜像并验证真实 Compose、HTTPS/WSS、静态下载和 Linux PTY；
+- 全部成功后推送 `:0.1.0`、`:latest` 及完整 Git commit SHA 标签。
+
+runner 需要 Docker、Buildx、Compose 和访问镜像仓库的权限，不需要预装 Node 或 Rust。
+构建使用该项目独立且持久的 BuildKit builder；缺少 ARM64 支持时会注册 QEMU binfmt。
+`resource_group` 串行发布，避免同一项目并发更新标签。流水线不部署 Master。
+GitLab 产物只保存安装包与验证结果，不上传测试秘密或容器日志。
+
+### 本机手动构建
 
 本机用 Docker Buildx 构建双架构静态 Agent，产物会放入 `web/public/downloads/agent/v<version>/`：
 
@@ -242,8 +260,11 @@ bash deploy/publish.sh
 
 该脚本推送 `registry.windgyre.com/library/blink-node-web:<version>` 和 `:latest`；
 静态安装资源已包含在镜像里，Web / 网关仍由 Compose 作为独立进程运行。
+构建脚本支持从环境传入 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`，使用 Docker 的预定义代理参数，
+不会将构建代理写入运行镜像。代理地址需要能从 Docker 构建容器访问。
+若宿主机和容器的代理地址不同，可单独设置 `BLINK_BUILD_PROXY`，仅覆盖构建容器的 HTTP / HTTPS 代理。
 发布前统一更新 `web/package.json`、`agent/Cargo.toml` 与锁文件中的版本号，以及 Compose 默认镜像标签。
 
 Agent 构建、镜像发布和服务器安装均不依赖 GitHub Actions。
-GitHub 仓库仅用于保存代码。本机执行上述脚本完成构建、验证与镜像推送。
+GitLab runner 自动运行构建发布，也可在本机执行相同脚本。GitHub 仅作为代码镜像。
 发布产物与本机测试秘密均被 Git 忽略，服务器只需访问你的 Master 下载地址。
