@@ -92,8 +92,23 @@ try {
       taskId: String(message.taskId),
       desiredVersion: Number(message.desiredVersion),
       ok: true,
-      result,
+      result: {
+        ...result,
+        status: { externalFirewall: true, ...((result.status as object) ?? {}) },
+      },
     });
+  }
+  async function drain() {
+    const tasks: Record<string, unknown>[] = [];
+    for (let round = 0; round < 12; round++) {
+      const ready = await dispatch();
+      if (!ready.length) return tasks;
+      for (const task of ready) {
+        tasks.push(task);
+        await complete(task);
+      }
+    }
+    throw new Error("proxy queue did not drain");
   }
   await initialProxyScan(entry);
   await initialProxyScan(entry);
@@ -323,7 +338,27 @@ try {
     api("instances", "POST", { ...externalInput, serverId: stranger }),
     /其他服务器/,
   );
+  await receiveProxyStatus(stranger, { externalFirewall: false });
+  await assert.rejects(api("instances", "POST", externalInput), /更新 Agent 和部署器/);
+  await receiveProxyStatus(stranger, { externalFirewall: true });
   const viaExternal = await api("instances", "POST", externalInput);
+  type FirewallPayload = {
+    retainExisting: boolean;
+    firewall: string;
+    exits: { id: string; port: number; udp: boolean; sources: string[] }[];
+  };
+  const [prepareFirewall] = await dispatch();
+  assert.equal(prepareFirewall.serverId, stranger);
+  assert.equal(prepareFirewall.operation, "firewall");
+  assert.deepEqual((prepareFirewall.payload as FirewallPayload).exits, [
+    { id: importedExit.id, port: 17501, udp: true, sources: ["9.9.9.9"] },
+  ]);
+  assert.equal((prepareFirewall.payload as FirewallPayload).retainExisting, true);
+  assert(
+    !JSON.stringify(prepareFirewall.payload).includes(importedPassword),
+    "firewall payload contains no source service credentials",
+  );
+  await complete(prepareFirewall);
   const externalTasks = await dispatch();
   assert.equal(externalTasks.length, 1);
   assert.equal(externalTasks[0].serverId, entry, "existing exit service is never redeployed");
@@ -333,8 +368,128 @@ try {
   assert.equal(externalPayload.instances[0].exits[0].password, importedPassword);
   assert.equal(externalPayload.instances[0].exits[0].port, 17501);
   await complete(externalTasks[0]);
+  const [cleanupFirewall] = await dispatch();
+  assert.equal(cleanupFirewall.operation, "firewall");
+  assert.equal((cleanupFirewall.payload as FirewallPayload).retainExisting, false);
+  assert(Number(cleanupFirewall.desiredVersion) > Number(prepareFirewall.desiredVersion));
+  await complete(cleanupFirewall);
+  await api(`hosts/${stranger}/apply`, "POST", {});
+  const sourceReapply = await drain();
+  assert.deepEqual(
+    sourceReapply.map((task) => task.operation),
+    ["firewall", "firewall"],
+    "reapplying an imported-only source never deploys services",
+  );
+  await api(`hosts/${entry}/apply`, "POST", {});
+  const [deniedFirewall] = await dispatch();
+  await receiveProxyResult(stranger, {
+    type: "proxy.result",
+    v: 1,
+    taskId: String(deniedFirewall.taskId),
+    desiredVersion: Number(deniedFirewall.desiredVersion),
+    ok: false,
+    result: { error: "injected UFW error" },
+  });
+  assert.equal(
+    (await dispatch()).length,
+    0,
+    "UFW failure prevents entrance deployment and cleanup",
+  );
+  await api(`hosts/${entry}/apply`, "POST", {});
+  await drain();
   await assert.rejects(api(`exits/${importedExit.id}`, "DELETE"), /链路引用/);
+  const secondInput = {
+    ...externalInput,
+    serverId: exit,
+    kind: "anytls",
+    port: 8443,
+    domain: "any.example.com",
+    upstream: "",
+    defaultOutbound: "direct",
+  };
+  const second = await api("instances", "POST", secondInput);
+  const sharedTasks = await drain();
+  assert.deepEqual(
+    new Set((sharedTasks[0].payload as FirewallPayload).exits[0].sources),
+    new Set(["9.9.9.9", "1.1.1.1"]),
+    "default and rule references share the source ACL",
+  );
+  assert.deepEqual(
+    sharedTasks.map((task) => task.operation),
+    ["firewall", "apply", "firewall"],
+  );
+  await api(`hosts/${entry}`, "PATCH", {
+    addresses: ["8.8.8.8", "2606:4700::1111"],
+    firewall: "existing",
+  });
+  const [newSources] = await dispatch();
+  assert.equal((newSources.payload as FirewallPayload).retainExisting, true);
+  assert.deepEqual(
+    new Set((newSources.payload as FirewallPayload).exits[0].sources),
+    new Set(["8.8.8.8", "2606:4700::1111", "1.1.1.1"]),
+  );
+  await complete(newSources);
+  const [failedEntrance] = await dispatch();
+  await receiveProxyResult(entry, {
+    type: "proxy.result",
+    v: 1,
+    taskId: String(failedEntrance.taskId),
+    desiredVersion: Number(failedEntrance.desiredVersion),
+    ok: false,
+    result: { error: "injected entrance failure" },
+  });
+  assert.equal(
+    (await dispatch()).length,
+    0,
+    "failed entrance never removes previously working source rules",
+  );
+  await api(`hosts/${entry}/apply`, "POST", {});
+  const repaired = await drain();
+  assert.deepEqual(
+    repaired.map((task) => task.operation),
+    ["firewall", "apply", "firewall"],
+  );
+  await api(`instances/${second.id}`, "PATCH", { ...secondInput, enabled: false });
+  const disabledTasks = await drain();
+  assert.deepEqual(
+    (disabledTasks.at(-1)!.payload as FirewallPayload).exits[0].sources,
+    ["8.8.8.8", "2606:4700::1111"],
+    "disabling one entrance retains the remaining entrance sources",
+  );
+  await api(`instances/${second.id}`, "DELETE");
+  await drain();
+  const alternative = structuredClone(
+    externalSnapshot.discoveries[0].configuration.effective.inbounds[0],
+  );
+  alternative.port = 17502;
+  externalSnapshot.discoveries[0].configuration.effective.inbounds.push(alternative);
+  await api(`hosts/${stranger}/scan`, "POST", {});
+  await complete((await dispatch())[0], externalSnapshot);
+  const alternativeExit = await api(`imports/${externalImport.id}/exits`, "POST", {
+    candidateKey: "1:-1",
+    name: "Alternative existing exit",
+  });
+  const switchedInput = { ...externalInput, defaultOutbound: alternativeExit.id, rules: [] };
+  await api(`instances/${viaExternal.id}`, "PATCH", switchedInput);
+  const switched = await drain();
+  const finalExits = (switched.at(-1)!.payload as FirewallPayload).exits;
+  assert.deepEqual(
+    finalExits.find((item) => item.id === importedExit.id)!.sources,
+    [],
+    "switching exits releases the old listener ACL",
+  );
+  assert.deepEqual(finalExits.find((item) => item.id === alternativeExit.id)!.sources, [
+    "8.8.8.8",
+    "2606:4700::1111",
+  ]);
+  await api(`instances/${viaExternal.id}`, "PATCH", externalInput);
+  await drain();
+  await api(`exits/${alternativeExit.id}`, "DELETE");
+  await drain();
   await api(`hosts/${stranger}`, "PATCH", { addresses: ["1.0.0.1"], firewall: "external" });
+  const [externalMode] = await dispatch();
+  assert.equal((externalMode.payload as FirewallPayload).firewall, "external");
+  await complete(externalMode);
   const [externalAddressChange] = await dispatch();
   assert.equal(
     externalAddressChange.serverId,
@@ -347,6 +502,7 @@ try {
     "1.0.0.1",
   );
   await complete(externalAddressChange);
+  await drain();
   externalSnapshot.discoveries[0].configuration.effective.inbounds[0].settings.password =
     randomBytes(32).toString("base64");
   await api(`hosts/${stranger}/scan`, "POST", {});
@@ -365,7 +521,13 @@ try {
     /先移除入口引用/,
   );
   await api(`instances/${viaExternal.id}`, "DELETE");
-  for (const task of await dispatch()) await complete(task);
+  const removedTasks = await drain();
+  assert.equal((removedTasks.at(-1)!.payload as FirewallPayload).retainExisting, false);
+  assert.deepEqual(
+    (removedTasks.at(-1)!.payload as FirewallPayload).exits[0].sources,
+    [],
+    "last reference removal clears the imported ACL",
+  );
   await api(`imports/${externalImport.id}/exits`, "POST", {
     candidateKey: candidates[0].key,
     name: "Changed",
@@ -379,6 +541,7 @@ try {
     "disappeared services become unavailable",
   );
   await api(`exits/${importedExit.id}`, "DELETE");
+  await drain();
   assert.equal(
     (await sql`SELECT * FROM proxy_instances WHERE server_id=${stranger}`).length,
     0,

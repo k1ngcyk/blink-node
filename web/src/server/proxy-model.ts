@@ -118,6 +118,8 @@ export const proxyStatus = z.object({
     })
     .optional(),
   version: z.number().int().nonnegative().optional(),
+  externalFirewall: z.boolean().optional(),
+  externalFirewallVersion: z.number().int().nonnegative().optional(),
 });
 export type ProxyStatus = z.infer<typeof proxyStatus>;
 export const proxyResult = z.object({

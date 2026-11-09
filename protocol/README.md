@@ -46,10 +46,13 @@ remote command field exists. PTY is a separately enabled, owner-authorized capab
 - `diagnostic.run {id,kind,unit}`: allowlisted `processes`, `services`, `logs`; fixed executable
   and argument construction, no shell interpolation. Optional unit has strict validation.
 - `terminal.open {id,streamToken}` / `terminal.close {id}`: Unix identity is decided locally.
-- `proxy.run {taskId,resourceId,desiredVersion,deadline,operation,payload}`: `scan` or `apply`.
+- `proxy.run {taskId,resourceId,desiredVersion,deadline,operation,payload}`: `scan`, `apply` or `firewall`.
   Agent validates server identity, bounds and deadline, then forwards through the group-restricted
   `/run/blink-proxy/control.sock`. Payload contains typed proxy specs, credentials, routes, node
   addresses, ACME email and firewall mode; no executable, shell or arbitrary output-path fields.
+  `firewall` instead carries `{firewall, retainExisting, exits: [{id, port, udp, sources}]}` without credentials.
+  It reconciles imported-exit ACLs alongside managed-instance rules without changing service configs or restarting cores.
+  Nodes advertise `status.externalFirewall=true` and `externalFirewallVersion`; old nodes must update before linking imported exits.
 
 ## Terminal stream
 
@@ -60,10 +63,15 @@ Shell exit, browser disconnect, credential revocation and gateway restart end th
 
 ## Proxy task delivery
 
-One pending task per node. Encrypted jobs persist before dispatch; unacknowledged jobs are
+One running task per node, with queued jobs dispatched in per-node FIFO order. Encrypted jobs persist before dispatch; unacknowledged jobs are
 redelivered after 45 seconds with the same ID and payload. Dependencies must complete before
 an entrance task is dispatched. Socket/transport failure is not treated as a confirmed failure;
 the helper's seven-day durable ledger answers redelivery. Jobs expire after 30 minutes.
+
+Imported-exit firewall jobs use separate monotonically increasing desired/applied versions.
+Prepare jobs retain existing source rules while allowing the new IPv4/IPv6 sources; entrance applies depend on them.
+Cleanup jobs run only after successful entrance applies, remove obsolete owned rules, and retain shared and administrator rules.
+Firewall-only rollback restores its own journal without touching service generations. Normal applies merge these imported ACLs.
 
 Apply generations are monotonically versioned. The local transaction journal restores prior
 configuration, units and owned firewall rules after failure/interruption. Successful same-version

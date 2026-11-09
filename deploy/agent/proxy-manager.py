@@ -407,6 +407,7 @@ def ufw_tag(rule):
 def ufw_existing(rule):
     """Recognize equivalent pre-existing rules without changing their comments."""
     source, port, protocol = rule
+    external = False
     for line in run(['ufw', 'show', 'added']).splitlines():
         try:
             args = shlex.split(line)
@@ -425,14 +426,14 @@ def ufw_existing(rule):
         old_port, _, suffix = old_port.partition('/')
         old_protocol = after('proto', suffix or 'any')
         if old_port == str(port) and old_source in ('any', source) and old_destination == 'any' and old_protocol in ('any', protocol):
-            return 'external'
-    return None
+            external = True
+    return 'external' if external else None
 
 
 def ufw_change(rule, delete=False):
     source, port, protocol = rule
     existing = ufw_existing(rule)
-    if (delete and existing != 'owned') or (not delete and existing == 'external'):
+    if (delete and existing != 'owned') or (not delete and existing in ('owned', 'external')):
         return False
     tag = ufw_tag(rule)
     args = ['ufw'] + (['--force', 'delete'] if delete else []) + ['allow', 'proto', protocol, 'from', source, 'to', 'any', 'port', str(port), 'comment', tag]
@@ -440,7 +441,7 @@ def ufw_change(rule, delete=False):
     return True
 
 
-def firewall_prepare(data, transaction):
+def firewall_prepare(data, transaction, external_rules=None):
     warnings = []
     previous = read_json(PRIVATE / 'firewall.json', [])
     if data['firewall'] == 'external':
@@ -458,7 +459,9 @@ def firewall_prepare(data, transaction):
     active = 'Status: active' in status
     if not active and data['firewall'] != 'enable':
         return previous, ['UFW 未启用；已保留其状态，请检查云安全组']
-    desired = ufw_rules(data)
+    if external_rules is None:
+        external_rules = read_json(PRIVATE / 'external-firewall.json', {}).get('rules', [])
+    desired = [list(rule) for rule in sorted({tuple(rule) for rule in ufw_rules(data) + external_rules})]
     # Never take ownership of an administrator's equivalent allow rule. UFW may
     # otherwise replace its comment, making a subsequent delete destructive.
     desired = [rule for rule in desired if ufw_existing(rule) != 'external']
@@ -484,8 +487,7 @@ def firewall_prepare(data, transaction):
         for rule in ssh_rules:
             ufw_change(rule)
     for rule in desired:
-        if rule not in previous:
-            ufw_change(rule)
+        ufw_change(rule)
     if not active:
         run(['ufw', '--force', 'enable'])
     warnings.append('UFW 规则已维护；云厂商安全组仍需开放相应端口')
@@ -602,6 +604,11 @@ def recover():
     transaction = read_json(PRIVATE / 'transaction.json')
     if not transaction:
         return
+    if transaction.get('firewallOnly'):
+        recover_firewall(transaction)
+        atomic(PRIVATE / 'external-firewall.json', canonical(transaction['externalBefore']))
+        (PRIVATE / 'transaction.json').unlink()
+        return
     previous = transaction.get('previous')
     for name in transaction.get('newUnits', []):
         run(['systemctl', 'disable', '--now', name], optional=True)
@@ -621,6 +628,12 @@ def recover():
         for item in previous_data['instances']:
             run(['systemctl', 'enable', '--now', service_name(item)], optional=True)
             run(['systemctl', 'restart', service_name(item)], optional=True)
+    recover_firewall(transaction)
+    atomic(PRIVATE / 'applied.json', canonical(transaction.get('appliedBefore', {'version': 0})))
+    (PRIVATE / 'transaction.json').unlink()
+
+
+def recover_firewall(transaction):
     if transaction.get('ufwWasActive') is False:
         run(['ufw', '--force', 'disable'])
     for rule in transaction.get('firewallAfter', []) + transaction.get('sshAdded', []):
@@ -629,8 +642,45 @@ def recover():
     for rule in transaction.get('firewallBefore', []):
         ufw_change(rule)
     atomic(PRIVATE / 'firewall.json', canonical(transaction.get('firewallBefore', [])))
-    atomic(PRIVATE / 'applied.json', canonical(transaction.get('appliedBefore', {'version': 0})))
-    (PRIVATE / 'transaction.json').unlink()
+
+
+def sync_external_firewall(data, version):
+    require(isinstance(data, dict) and set(data) == {'exits', 'firewall', 'retainExisting'}, '出口防火墙参数无效')
+    require(data['firewall'] in ('existing', 'enable', 'external') and type(data['retainExisting']) is bool, '防火墙模式无效')
+    require(isinstance(data['exits'], list) and len(data['exits']) <= 100, '出口数量超限')
+    rules = set()
+    for exit in data['exits']:
+        require(isinstance(exit, dict) and set(exit) == {'id', 'port', 'udp', 'sources'}, '出口防火墙参数无效')
+        uuid.UUID(exit['id'])
+        require(type(exit['port']) is int and 1 <= exit['port'] <= 65535 and type(exit['udp']) is bool, '出口端口无效')
+        require(isinstance(exit['sources'], list) and len(exit['sources']) <= 1000 and all(public_ip(a) for a in exit['sources']), '出口来源地址无效')
+        for source in exit['sources']:
+            rules.add((str(ipaddress.ip_address(source)), exit['port'], 'tcp'))
+            if exit['udp']:
+                rules.add((str(ipaddress.ip_address(source)), exit['port'], 'udp'))
+    previous = read_json(PRIVATE / 'external-firewall.json', {'version': 0, 'rules': []})
+    fingerprint = digest(canonical(data))
+    if version <= previous['version']:
+        require(version == previous['version'] and fingerprint == previous.get('fingerprint'), '拒绝过期防火墙版本')
+        return {'status': status(), 'warnings': [], 'message': '出口防火墙版本已应用'}
+    if data['retainExisting']:
+        rules.update(tuple(rule) for rule in previous['rules'])
+    desired = [list(rule) for rule in sorted(rules)]
+    transaction = {'firewallOnly': True, 'externalBefore': previous, 'firewallBefore': read_json(PRIVATE / 'firewall.json', [])}
+    atomic(PRIVATE / 'transaction.json', canonical(transaction))
+    try:
+        local = read_json(ROOT / 'current' / 'desired.json', {'instances': []})
+        firewall, warnings = firewall_prepare({**local, 'firewall': data['firewall']}, transaction, desired)
+        for rule in transaction['firewallBefore']:
+            if rule not in firewall:
+                ufw_change(rule, delete=True)
+        atomic(PRIVATE / 'firewall.json', canonical(firewall))
+        atomic(PRIVATE / 'external-firewall.json', canonical({'version': version, 'fingerprint': fingerprint, 'rules': desired}))
+        (PRIVATE / 'transaction.json').unlink()
+        return {'status': status(), 'warnings': warnings}
+    except Exception:
+        recover()
+        raise
 
 
 def apply(data, version, deadline):
@@ -730,6 +780,7 @@ def status(data=None, refresh_network=False):
             row['certificate'] = certificate_info(source[0])
         items.append(row)
     return {'instances': items, **ufw_status(), 'network': public_addresses(refresh_network),
+            'externalFirewall': True, 'externalFirewallVersion': read_json(PRIVATE / 'external-firewall.json', {'version': 0})['version'],
             'checkedAt': datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z'),
             'version': read_json(PRIVATE / 'applied.json', {'version': 0})['version']}
 
@@ -983,7 +1034,7 @@ def handle(message):
     task_id = str(uuid.UUID(message['taskId']))
     uuid.UUID(message['resourceId'])
     operation = message['operation']
-    require(operation in ('scan', 'apply'), '操作不受支持')
+    require(operation in ('scan', 'apply', 'firewall'), '操作不受支持')
     version = message['desiredVersion']
     require(type(version) is int and 0 <= version < 2**31, '配置版本无效')
     deadline = datetime.datetime.fromisoformat(message['deadline'].replace('Z', '+00:00')).timestamp()
@@ -996,7 +1047,7 @@ def handle(message):
     require(deadline > time.time(), '任务已过期')
     recover()
     try:
-        result = scan() if operation == 'scan' else apply(message['payload'], version, deadline)
+        result = scan() if operation == 'scan' else sync_external_firewall(message['payload'], version) if operation == 'firewall' else apply(message['payload'], version, deadline)
         outcome = {'ok': True, 'result': result}
     except DeploymentError as error:
         outcome = {'ok': False, 'result': {'error': str(error)[:500]}}

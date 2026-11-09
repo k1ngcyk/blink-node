@@ -39,7 +39,7 @@ pub async fn run(message: Value, node_id: &str) -> Result<Value> {
     if task.v != 1
         || task.kind != "proxy.run"
         || task.resource_id != node_id
-        || !matches!(task.operation.as_str(), "scan" | "apply")
+        || !matches!(task.operation.as_str(), "scan" | "apply" | "firewall")
         || !task.payload.is_object()
     {
         bail!("Invalid proxy task");

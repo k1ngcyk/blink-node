@@ -224,6 +224,76 @@ class ProxyTests(unittest.TestCase):
         with patch.object(m, 'run', side_effect=["ufw allow 443/tcp comment '" + m.ufw_tag(rule) + "'\n", '']) as command:
             self.assertTrue(m.ufw_change(rule, delete=True))
             self.assertEqual(command.call_args_list[-1].args[0][:3], ['ufw', '--force', 'delete'])
+        with patch.object(m, 'run', return_value="ufw allow 443/tcp comment 'administrator'\nufw allow 443/tcp comment '" + m.ufw_tag(rule) + "'\n"):
+            self.assertEqual(m.ufw_existing(rule), 'owned', 'an earlier broad administrator rule must not hide our cleanup target')
+
+    def test_imported_firewall_reconciles_sources_without_redeploying_services(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); private = root / 'manager'; private.mkdir()
+            current = root / 'current'; current.mkdir()
+            local = {'instances': [fixture()]}
+            (current / 'desired.json').write_text(json.dumps(local))
+            (private / 'applied.json').write_text('{"version":42}')
+            managed = {('any', 80, 'tcp'), ('any', 443, 'tcp')}
+            owned = set(managed)
+            external = {('1.1.1.1', 17501, 'tcp')}
+            (private / 'firewall.json').write_text(json.dumps([list(rule) for rule in owned]))
+            failing = set()
+            def existing(rule):
+                return 'owned' if tuple(rule) in owned else 'external' if tuple(rule) in external else None
+            def change(rule, delete=False):
+                rule = tuple(rule)
+                if rule in failing:
+                    failing.remove(rule)
+                    raise m.DeploymentError('injected UFW failure')
+                if rule in external:
+                    return False
+                if delete: owned.discard(rule)
+                else: owned.add(rule)
+                return True
+            data = {'firewall': 'existing', 'retainExisting': True, 'exits': [{'id': str(uuid.uuid4()), 'port': 17501, 'udp': True, 'sources': ['8.8.8.8', '2606:4700::1111', '1.1.1.1']}]}
+            with patch.object(m, 'ROOT', root), patch.object(m, 'PRIVATE', private), patch.object(m.shutil, 'which', return_value='/usr/sbin/ufw'), patch.object(m, 'status', return_value={'externalFirewall': True}), patch.object(m, 'ufw_existing', side_effect=existing), patch.object(m, 'ufw_change', side_effect=change), patch.object(m, 'run', return_value='Status: active') as run:
+                m.sync_external_firewall(data, 1)
+                old = set(owned)
+                self.assertTrue(managed.issubset(owned))
+                self.assertIn(('2606:4700::1111', 17501, 'udp'), owned)
+                self.assertNotIn(('1.1.1.1', 17501, 'tcp'), owned)
+                data['exits'][0]['sources'] = ['9.9.9.9']
+                m.sync_external_firewall(data, 2)
+                self.assertTrue(old.issubset(owned), 'prepare retains the previously working source addresses')
+                data['retainExisting'] = False
+                m.sync_external_firewall(data, 3)
+                expected = managed | {('9.9.9.9', 17501, 'tcp'), ('9.9.9.9', 17501, 'udp')}
+                self.assertEqual(owned, expected)
+                count = run.call_count
+                m.sync_external_firewall(data, 3)
+                self.assertEqual(run.call_count, count, 'version redelivery is idempotent')
+                with self.assertRaises(m.DeploymentError): m.sync_external_firewall(data, 2)
+                owned.remove(('9.9.9.9', 17501, 'tcp'))
+                m.sync_external_firewall(data, 4)
+                self.assertEqual(owned, expected, 'reconciliation repairs an externally removed owned rule')
+                data['exits'][0]['sources'] = ['4.2.2.2']
+                failing.add(('4.2.2.2', 17501, 'udp'))
+                with self.assertRaises(m.DeploymentError): m.sync_external_firewall(data, 5)
+                self.assertEqual(owned, expected, 'partial UFW failures restore the previous rules')
+                self.assertEqual(m.read_json(private / 'external-firewall.json')['version'], 4)
+                data.update(firewall='external', exits=[])
+                m.sync_external_firewall(data, 6)
+                self.assertEqual(owned, expected, 'externally managed firewalls remain untouched')
+                data['firewall'] = 'existing'
+                m.sync_external_firewall(data, 7)
+                self.assertEqual(owned, managed, 'removing the last reference removes only imported owned rules')
+                self.assertTrue(all(call.args[0] == ['ufw', 'status'] for call in run.call_args_list), 'firewall-only reconciliation never invokes a core or systemd')
+                self.assertEqual(m.read_json(private / 'applied.json'), {'version': 42})
+                self.assertEqual(m.read_json(current / 'desired.json'), local)
+                self.assertEqual(external, {('1.1.1.1', 17501, 'tcp')})
+                self.assertFalse((private / 'transaction.json').exists())
+
+    def test_imported_firewall_rejects_unbounded_sources_and_ports(self):
+        data = {'firewall': 'existing', 'retainExisting': False, 'exits': [{'id': str(uuid.uuid4()), 'port': 17501, 'udp': True, 'sources': ['any']}]}
+        with self.assertRaises(m.DeploymentError): m.sync_external_firewall(data, 1)
+        data['exits'][0].update(sources=['8.8.8.8'], port=70000)
+        with self.assertRaises(m.DeploymentError): m.sync_external_firewall(data, 1)
 
     def test_scanner_follows_web_includes_and_associates_listeners(self):
         with tempfile.TemporaryDirectory() as temp:

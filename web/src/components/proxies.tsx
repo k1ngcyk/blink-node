@@ -52,6 +52,8 @@ type Host = {
   firewall: string;
   desired_version?: number;
   applied_version?: number;
+  firewall_desired_version?: number;
+  firewall_applied_version?: number;
   scanned_at?: string;
   observed?: ProxyStatus;
   imports: Imported[];
@@ -296,6 +298,12 @@ export function Proxies({ serverId }: { serverId?: string }) {
                     : "刷新节点扫描可获取最新状态"}
                 </small>
               </div>
+              {!!host.data?.firewall_desired_version && (
+                <small className="muted">
+                  已有出口 UFW 同步版本 {host.data.firewall_applied_version ?? 0} /{" "}
+                  {host.data.firewall_desired_version}
+                </small>
+              )}
               {observed?.ufw && (
                 <details className="text-sm">
                   <summary className="cursor-pointer muted">查看 UFW 状态与规则</summary>
@@ -309,7 +317,14 @@ export function Proxies({ serverId }: { serverId?: string }) {
               <Button
                 type="button"
                 variant="outline"
-                disabled={busy || jobsRunning || !local.length}
+                disabled={
+                  busy ||
+                  jobsRunning ||
+                  (!local.length &&
+                    !exits.data?.some(
+                      (exit) => exit.source === "imported" && exit.server_id === selectedId,
+                    ))
+                }
                 onClick={() => void act(() => api(`proxy/hosts/${selectedId}/apply`, "POST", {}))}
               >
                 重新应用配置
@@ -574,7 +589,11 @@ export function Proxies({ serverId }: { serverId?: string }) {
               <li key={job.id}>
                 <div className="row between">
                   <strong className="font-medium">
-                    {job.operation === "scan" ? "扫描服务" : "应用节点配置"}
+                    {job.operation === "scan"
+                      ? "扫描服务"
+                      : job.operation === "firewall"
+                        ? "同步出口 UFW"
+                        : "应用节点配置"}
                   </strong>
                   <span className={job.state === "failed" ? "error-text" : "muted"}>
                     {states[job.state]}

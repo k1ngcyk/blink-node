@@ -126,8 +126,9 @@ async function enqueue(
   tx: DB,
   serverId: string,
   userId: string | null,
-  operation: "scan" | "apply",
+  operation: "scan" | "apply" | "firewall",
   dependencies: string[] = [],
+  retainExisting = false,
 ) {
   await tx`INSERT INTO proxy_hosts(server_id) VALUES(${serverId}) ON CONFLICT DO NOTHING`;
   let version = 0,
@@ -141,9 +142,65 @@ async function enqueue(
       throw new HttpError(400, "节点配置超过大小上限，请减少实例或分流规则");
     await tx`UPDATE proxy_instances SET state='pending',error=NULL WHERE server_id=${serverId} AND state<>'deleting'`;
   }
+  if (operation === "firewall") {
+    const exits = await tx<
+      ExternalExit[]
+    >`SELECT * FROM proxy_external_exits WHERE server_id=${serverId}`;
+    const instances = await tx<
+      Instance[]
+    >`SELECT * FROM proxy_instances WHERE state<>'deleting' AND spec->>'enabled'='true'`;
+    const hosts = await tx`SELECT server_id,addresses FROM proxy_hosts`;
+    const [host] =
+      await tx`UPDATE proxy_hosts SET firewall_desired_version=firewall_desired_version+1 WHERE server_id=${serverId} RETURNING firewall_desired_version,firewall`;
+    version = host.firewall_desired_version;
+    value = {
+      firewall: host.firewall,
+      retainExisting,
+      exits: exits.map((exit) => ({
+        id: exit.id,
+        port: exit.port,
+        udp: exit.udp,
+        sources: [
+          ...new Set(
+            instances
+              .filter((i) => referencedExits(i.spec).includes(exit.id))
+              .flatMap((i) => hosts.find((h) => h.server_id === i.server_id)?.addresses ?? []),
+          ),
+        ],
+      })),
+    };
+    if (Buffer.byteLength(JSON.stringify(value)) > 210000)
+      throw new HttpError(400, "出口防火墙规则超过大小上限");
+  }
   const [job] =
     await tx`INSERT INTO proxy_jobs(server_id,user_id,operation,desired_version,encrypted_payload,depends_on) VALUES(${serverId},${userId},${operation},${version},${encrypt(JSON.stringify(value))},${dependencies}) RETURNING id`;
   return job.id as string;
+}
+
+async function withExternalFirewall(
+  tx: TransactionSql,
+  serverIds: string[],
+  userId: string,
+  apply: (dependencies: string[]) => Promise<string[]>,
+) {
+  const servers = [...new Set(serverIds)];
+  if (servers.length) await idle(tx, servers);
+  for (const server of servers) {
+    await available(tx, server);
+    const [host] = await tx`SELECT observed FROM proxy_hosts WHERE server_id=${server}`;
+    if (!host?.observed.externalFirewall)
+      throw new HttpError(409, "已有出口节点需要更新 Agent 和部署器，以支持 UFW 自动同步");
+  }
+  // Open new source addresses first, then remove obsolete ones only after all
+  // entrance deployments succeed. Failed deployments retain the working ACL.
+  const dependencies: string[] = [];
+  for (const server of servers)
+    dependencies.push(await enqueue(tx, server, userId, "firewall", [], true));
+  const jobs = await apply(dependencies);
+  const cleanups: string[] = [];
+  for (const server of servers)
+    cleanups.push(await enqueue(tx, server, userId, "firewall", [...dependencies, ...jobs]));
+  return jobs.length ? jobs : cleanups;
 }
 export async function initialProxyScan(serverId: string) {
   await sql.begin(async (tx) => {
@@ -228,7 +285,9 @@ export async function proxyApi(
       const all = await tx<Instance[]>`SELECT * FROM proxy_instances`;
       if (all.some((item) => referencedExits(item.spec).includes(id)))
         throw new HttpError(409, "出口正在被链路引用，请先调整入口规则");
-      await tx`DELETE FROM proxy_external_exits WHERE id=${id}`;
+      const removed = await tx`DELETE FROM proxy_external_exits WHERE id=${id} RETURNING server_id`;
+      if (removed.length)
+        await withExternalFirewall(tx, [removed[0].server_id], user.id, async () => []);
     });
     await audit(user.id, "proxy.exit.removed", id);
     return json({ ok: true });
@@ -237,7 +296,7 @@ export async function proxyApi(
     const id = uuid.parse(path[2]);
     if (method === "GET") {
       const [host] =
-        await sql`SELECT server_id,addresses,firewall,desired_version,applied_version,scanned_at,observed FROM proxy_hosts WHERE server_id=${id}`;
+        await sql`SELECT server_id,addresses,firewall,desired_version,applied_version,firewall_desired_version,firewall_applied_version,scanned_at,observed FROM proxy_hosts WHERE server_id=${id}`;
       const imports =
         await sql`SELECT id,source_key,summary,updated_at FROM proxy_imports WHERE server_id=${id} ORDER BY updated_at DESC`;
       const jobs =
@@ -269,12 +328,10 @@ export async function proxyApi(
         >`SELECT * FROM proxy_instances WHERE state<>'deleting'`;
         // Endpoint changes require reapplying all linked entrances; this operation
         // queues them with dependencies instead of leaving stale outbound addresses.
-        const external = await tx<
-          ExternalExit[]
-        >`SELECT * FROM proxy_external_exits WHERE server_id=${id}`;
+        const external = await tx<ExternalExit[]>`SELECT * FROM proxy_external_exits`;
         const own = [
           ...instances.filter((i) => i.server_id === id).map((i) => i.id),
-          ...external.map((i) => i.id),
+          ...external.filter((i) => i.server_id === id).map((i) => i.id),
         ];
         const localExitIds = instances
           .filter((i) => i.server_id === id)
@@ -296,26 +353,39 @@ export async function proxyApi(
         for (const i of local)
           if (i.spec.domain && i.spec.manageDns)
             await ensureDns(id, i.spec.domain, input.addresses);
-        const downstreamDependencies: string[] = [];
-        let exitServers: string[] = [];
-        if (local.length) {
-          const dependencies: string[] = [];
-          exitServers = [
-            ...new Set(
-              instances.filter((i) => localExitIds.includes(i.id)).map((i) => i.server_id),
-            ),
-          ].filter((v) => v !== id);
-          for (const server of exitServers) {
-            await available(tx, server);
-            dependencies.push(await enqueue(tx, server, user.id, "apply"));
+        const relatedExitIds = instances
+          .filter((i) => [id, ...affected].includes(i.server_id))
+          .flatMap((i) => referencedExits(i.spec));
+        const firewallServers = external
+          .filter((e) => e.server_id === id || relatedExitIds.includes(e.id))
+          .map((e) => e.server_id);
+        await withExternalFirewall(tx, firewallServers, user.id, async (firewallDependencies) => {
+          const downstreamDependencies: string[] = [...firewallDependencies];
+          const jobs: string[] = [];
+          let exitServers: string[] = [];
+          if (local.length) {
+            const dependencies: string[] = [...firewallDependencies];
+            exitServers = [
+              ...new Set(
+                instances.filter((i) => localExitIds.includes(i.id)).map((i) => i.server_id),
+              ),
+            ].filter((v) => v !== id);
+            for (const server of exitServers) {
+              await available(tx, server);
+              const job = await enqueue(tx, server, user.id, "apply", firewallDependencies);
+              dependencies.push(job);
+              jobs.push(job);
+            }
+            const job = await enqueue(tx, id, user.id, "apply", dependencies);
+            downstreamDependencies.push(job);
+            jobs.push(job);
           }
-          const job = await enqueue(tx, id, user.id, "apply", dependencies);
-          downstreamDependencies.push(job);
-        }
-        for (const server of affected.filter((v) => !exitServers.includes(v))) {
-          await available(tx, server);
-          await enqueue(tx, server, user.id, "apply", downstreamDependencies);
-        }
+          for (const server of affected.filter((v) => !exitServers.includes(v))) {
+            await available(tx, server);
+            jobs.push(await enqueue(tx, server, user.id, "apply", downstreamDependencies));
+          }
+          return jobs;
+        });
       });
       await audit(user.id, "proxy.host.updated", id);
       return json({ ok: true });
@@ -332,16 +402,31 @@ export async function proxyApi(
         const exitServers = [
           ...new Set(instances.filter((i) => exitIds.includes(i.id)).map((i) => i.server_id)),
         ].filter((v) => v !== id);
-        const dependencies: string[] = [];
+        const external = await tx<ExternalExit[]>`SELECT * FROM proxy_external_exits`;
+        const firewallServers = external
+          .filter((e) => e.server_id === id || exitIds.includes(e.id))
+          .map((e) => e.server_id);
         if (exitServers.length) await idle(tx, exitServers);
-        for (const server of exitServers) {
-          await available(tx, server);
-          dependencies.push(await enqueue(tx, server, user.id, "apply"));
-        }
-        const [host] = await tx`SELECT addresses FROM proxy_hosts WHERE server_id=${id}`;
-        for (const i of instances.filter((i) => i.server_id === id && i.state !== "deleting"))
-          if (i.spec.domain && i.spec.manageDns) await ensureDns(id, i.spec.domain, host.addresses);
-        return enqueue(tx, id, user.id, "apply", dependencies);
+        const [job] = await withExternalFirewall(
+          tx,
+          firewallServers,
+          user.id,
+          async (firewallDependencies) => {
+            const dependencies = [...firewallDependencies];
+            for (const server of exitServers) {
+              await available(tx, server);
+              dependencies.push(await enqueue(tx, server, user.id, "apply", firewallDependencies));
+            }
+            const [host] = await tx`SELECT addresses FROM proxy_hosts WHERE server_id=${id}`;
+            for (const i of instances.filter((i) => i.server_id === id && i.state !== "deleting"))
+              if (i.spec.domain && i.spec.manageDns)
+                await ensureDns(id, i.spec.domain, host.addresses);
+            return instances.some((i) => i.server_id === id) || !firewallServers.length
+              ? [await enqueue(tx, id, user.id, "apply", dependencies)]
+              : [];
+          },
+        );
+        return job;
       });
       await audit(user.id, "proxy.reapply", id);
       return json({ id: job }, 202);
@@ -450,10 +535,15 @@ export async function proxyApi(
         else
           await tx`INSERT INTO proxy_instances(id,server_id,name,kind,spec,encrypted_credentials) VALUES(${id},${serverId},${input.name},${input.kind},${tx.json(input)},${encrypt(JSON.stringify(credentials(input.kind)))})`;
       } else await tx`UPDATE proxy_instances SET state='deleting',updated_at=now() WHERE id=${id}`;
-      const dependencies: string[] = [];
-      for (const exitServer of affectedExits)
-        dependencies.push(await enqueue(tx, exitServer, user.id, "apply"));
-      await enqueue(tx, serverId, user.id, "apply", dependencies);
+      const firewallServers = external
+        .filter((e) => exitIds.includes(e.id))
+        .map((e) => e.server_id);
+      await withExternalFirewall(tx, firewallServers, user.id, async (firewallDependencies) => {
+        const dependencies = [...firewallDependencies];
+        for (const exitServer of affectedExits)
+          dependencies.push(await enqueue(tx, exitServer, user.id, "apply", firewallDependencies));
+        return [await enqueue(tx, serverId, user.id, "apply", dependencies)];
+      });
     });
     await audit(user.id, method === "DELETE" ? "proxy.deleted" : "proxy.configured", id);
     return json({ id }, 202);
@@ -562,7 +652,12 @@ export async function receiveProxyResult(serverId: string, message: z.infer<type
         : "节点任务失败";
     const summary = message.ok
       ? {
-          message: job.operation === "scan" ? "扫描完成" : "部署完成",
+          message:
+            job.operation === "scan"
+              ? "扫描完成"
+              : job.operation === "firewall"
+                ? "出口防火墙同步完成"
+                : "部署完成",
           warnings: z
             .array(z.string().max(500))
             .max(100)
@@ -570,6 +665,10 @@ export async function receiveProxyResult(serverId: string, message: z.infer<type
         }
       : { error };
     await tx`UPDATE proxy_jobs SET state=${message.ok ? "done" : "failed"},result=${tx.json(summary)} WHERE id=${job.id}`;
+    if (job.operation === "firewall" && message.ok) {
+      await saveProxyStatus(tx, serverId, message.result.status ?? {});
+      await tx`UPDATE proxy_hosts SET firewall_applied_version=${message.desiredVersion} WHERE server_id=${serverId}`;
+    }
     if (job.operation === "scan" && message.ok) {
       const discoveries = z
         .array(
@@ -620,7 +719,7 @@ export async function dispatchProxy(send: (id: string, message: unknown) => bool
   await sql`UPDATE proxy_jobs SET state='failed',result='{"error":"任务已过期，请重新扫描或应用配置"}'::jsonb WHERE state IN ('queued','running') AND expires_at<now()`;
   await sql`UPDATE proxy_jobs j SET state='failed',result='{"error":"关联出口部署失败，请重新应用配置"}'::jsonb WHERE j.state='queued' AND EXISTS(SELECT 1 FROM proxy_jobs d WHERE d.id=ANY(j.depends_on) AND d.state='failed')`;
   const jobs =
-    await sql`SELECT * FROM proxy_jobs j WHERE j.state IN ('queued','running') AND (j.sent_at IS NULL OR j.sent_at<now()-interval '45 seconds') AND NOT EXISTS(SELECT 1 FROM proxy_jobs d WHERE d.id=ANY(j.depends_on) AND d.state<>'done') ORDER BY created_at LIMIT 20`;
+    await sql`SELECT * FROM proxy_jobs j WHERE j.state IN ('queued','running') AND (j.sent_at IS NULL OR j.sent_at<now()-interval '45 seconds') AND NOT EXISTS(SELECT 1 FROM proxy_jobs d WHERE d.id=ANY(j.depends_on) AND d.state<>'done') AND NOT EXISTS(SELECT 1 FROM proxy_jobs earlier WHERE earlier.server_id=j.server_id AND earlier.queue_seq<j.queue_seq AND earlier.state IN ('queued','running')) ORDER BY j.queue_seq LIMIT 20`;
   for (const job of jobs) {
     const message = {
       v: 1,
