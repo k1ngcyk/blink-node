@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+description="Blink Node server monitoring agent"
+supervisor=supervise-daemon
+command=/usr/local/bin/blink-agent
+command_args="--config /etc/blink-agent/config.toml run"
+command_user="${blink_user:-blink-agent}:blink-agent"
+pidfile=/run/blink-agent/supervisor.pid
+respawn_delay=5
+respawn_max=10
+respawn_period=60
+retry="TERM/15/KILL/5"
+stopgroup=yes
+umask=0077
+output_log=/var/log/blink-agent/current.log
+error_log=/var/log/blink-agent/current.log
+depend() {
+    use net
+    after bootmisc
+}
+start_pre() {
+    checkpath --directory --mode 0750 --owner root:blink-agent /run/blink-agent /var/log/blink-agent
+    checkpath --file-truncate --mode 0640 --owner "$command_user" "$output_log"
+}
+extra_commands="instance"
+instance() {
+    printf '%s:%s\n' "$(service_get_value child_pid)" "$(service_get_value start_time)"
+}

@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Switch an already enrolled systemd installation to a root web terminal.
+# Switch an already enrolled installation to a root web terminal.
 set -euo pipefail
 umask 077
 die() { printf 'Blink Agent: %s\n' "$*" >&2; exit 1; }
 [[ ${EUID} -eq 0 ]] || die 'Run as root.'
-[[ $(uname -s) == Linux ]] || die 'Linux with systemd is required.'
+[[ $(uname -s) == Linux ]] || die 'Linux is required.'
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$script_dir/service-platform.sh"
+blink_platform
 config=/etc/blink-agent/config.toml
 override=/etc/systemd/system/blink-agent.service.d/terminal.conf
+[[ $BLINK_INIT != openrc ]] || override=/etc/conf.d/blink-agent
 [[ -f "$config" ]] || die 'Install and enroll the agent first.'
 [[ -f "$script_dir/root-terminal.conf.example" ]] || die 'Keep root-terminal.conf.example beside this script.'
-systemctl show-environment >/dev/null
 
 # Preserve the original local configuration and any existing terminal override.
 [[ -e "$config.before-root-terminal" ]] || cp -p -- "$config" "$config.before-root-terminal"
@@ -31,9 +33,15 @@ awk '
 chmod --reference="$config" "$work"
 chown --reference="$config" "$work"
 install -d -m 0755 -o root -g root "$(dirname -- "$override")"
-install -m 0644 -o root -g root "$script_dir/root-terminal.conf.example" "$override"
+if [[ $BLINK_INIT == openrc ]]; then
+  # Keep administrator OpenRC settings; the final assignment wins.
+  printf '\nblink_user=root\n' >> "$override"
+  chmod 0644 "$override"
+else
+  install -m 0644 -o root -g root "$script_dir/root-terminal.conf.example" "$override"
+fi
 mv -f -- "$work" "$config"
-systemctl daemon-reload
-systemctl restart blink-agent
-systemctl is-active --quiet blink-agent || die 'Service failed to start; inspect journalctl -u blink-agent.'
+[[ $BLINK_INIT != systemd ]] || systemctl daemon-reload
+blink_service_restart blink-agent
+blink_service_active blink-agent || die 'Service failed to start; inspect service logs.'
 printf 'Root web terminal enabled. Reconnect from the panel; run id -un to verify.\n'

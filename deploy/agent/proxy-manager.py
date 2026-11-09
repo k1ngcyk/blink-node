@@ -11,6 +11,7 @@ import grp
 import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -32,11 +33,20 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 ROOT = Path('/var/lib/blink-proxy')
+PROC = Path('/proc')
 PRIVATE = ROOT / 'manager'
 BIN = Path('/usr/local/libexec/blink-proxy/bin')
-UNITS = Path('/etc/systemd/system')
+OPENRC = Path('/sbin/openrc-run').exists() and not Path('/run/systemd/system').exists()
+MUSL = Path('/etc/alpine-release').exists() or bool(glob.glob('/lib/ld-musl-*.so.1'))
+UNITS = Path('/etc/init.d' if OPENRC else '/etc/systemd/system')
+UNIT_MODE = 0o755 if OPENRC else 0o644
+WEB_SERVICE = 'blink-proxy-web' + ('' if OPENRC else '.service')
 MANIFEST = Path('/usr/local/libexec/blink-proxy/assets.json')
 CONTROL = '/run/blink-proxy/control.sock'
 ADMIN = 'unix//run/blink-proxy-web/admin.sock'
@@ -122,7 +132,43 @@ def run(args, timeout=30, optional=False, input_data=None, as_proxy=False):
 
 
 def service_name(instance):
-    return 'blink-proxy-' + str(uuid.UUID(instance['id'])) + '.service'
+    return 'blink-proxy-' + str(uuid.UUID(instance['id'])) + ('' if OPENRC else '.service')
+
+
+def service(args, optional=False):
+    if not OPENRC:
+        return run(['systemctl', *args], optional=optional)
+    action = args[0]
+    if action == 'daemon-reload':
+        return ''
+    name = args[-1]
+    require(re.fullmatch(r'blink-proxy-[a-zA-Z0-9-]+', name), '服务名称无效')
+    if action == 'is-active':
+        result = run(['rc-service', name, 'status'], optional=True)
+        if 'started' not in result:
+            return 'inactive'
+        try:
+            pid = Path('/run/openrc/options', name, 'child_pid').read_text().strip()
+            require(pid.isdigit(), '服务进程无效')
+            fields = (PROC / pid / 'stat').read_text().rsplit(')', 1)[1].split()
+            args = (PROC / pid / 'cmdline').read_bytes().split(b'\0')
+            return 'active' if fields[0] != 'Z' and args[0] in [os.fsencode(binary(e)) for e in ('xray', 'sing-box', 'caddy')] else 'inactive'
+        except (OSError, IndexError, DeploymentError):
+            return 'inactive'
+    if action == 'enable':
+        run(['rc-update', 'add', name, 'default'], optional=optional)
+        if '--now' in args and service(['is-active', name]) != 'active':
+            return run(['rc-service', name, 'start'], optional=optional)
+    elif action == 'disable':
+        if '--now' in args and (UNITS / name).exists():
+            run(['rc-service', name, 'stop'], optional=optional)
+        if Path('/etc/runlevels/default', name).exists():
+            run(['rc-update', 'del', name, 'default'], optional=optional)
+    elif action == 'restart' or action == 'try-restart' and service(['is-active', name]) == 'active':
+        return run(['rc-service', name, 'restart'], optional=optional)
+    elif action != 'try-restart':
+        raise DeploymentError('服务操作不受支持')
+    return ''
 
 
 def public_ip(value):
@@ -322,7 +368,8 @@ def caddy_config(data):
 
 def binary(engine):
     manifest = read_json(MANIFEST)
-    return BIN / (engine + '-' + manifest[engine]['version'])
+    suffix = '-musl' if MUSL and 'musl' in manifest[engine] else ''
+    return BIN / (engine + '-' + manifest[engine]['version'] + suffix)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -342,7 +389,8 @@ def install_binary(engine):
     marker = PRIVATE / (target.name + '.sha256')
     if target.exists() and marker.exists() and digest(target.read_bytes()) == marker.read_text():
         return
-    asset = manifest[engine][arch]
+    spec = manifest[engine]
+    asset = (spec.get('musl', spec) if MUSL else spec)[arch]
     origin = read_json(PRIVATE / 'origin.json')['origin']
     parsed = urllib.parse.urlsplit(origin)
     require(parsed.scheme == 'https' and parsed.path in ('', '/') and not parsed.username and not parsed.query, '代理资源需要 HTTPS Master')
@@ -369,6 +417,21 @@ def install_binary(engine):
 
 
 def unit(engine, config_path):
+    if OPENRC:
+        args = ['run', '--config' if engine == 'caddy' else '-c', str(config_path)]
+        extra = '    checkpath --directory --mode 0700 --owner blink-proxy:blink-proxy /run/blink-proxy-web\n' if engine == 'caddy' else ''
+        return ('#!/sbin/openrc-run\n'
+                'description="Blink managed ' + engine + '"\nsupervisor=supervise-daemon\n'
+                'command=' + shlex.quote(str(binary(engine))) + '\ncommand_args=' + shlex.quote(shlex.join(args)) + '\n'
+                'command_user=blink-proxy:blink-proxy\npidfile=/run/${RC_SVCNAME}.pid\n'
+                'respawn_delay=3\nrespawn_max=10\nrespawn_period=60\nretry="TERM/15/KILL/5"\numask=0077\n'
+                'capabilities="^cap_net_bind_service"\nno_new_privs=yes\n'
+                'export HOME=/var/lib/blink-proxy\nexport XDG_DATA_HOME=/var/lib/blink-proxy/caddy\n'
+                'output_log=/var/log/blink-proxy/${RC_SVCNAME}.log\nerror_log=$output_log\n'
+                'depend() { use net; after bootmisc; }\nstart_pre() {\n'
+                '    checkpath --directory --mode 0750 --owner root:blink-proxy /var/log/blink-proxy\n'
+                '    checkpath --file-truncate --mode 0640 --owner blink-proxy:blink-proxy "$output_log"\n'
+                + extra + '}\n').encode()
     command = str(binary(engine)) + (' run --config ' if engine == 'caddy' else ' run -c ') + str(config_path)
     extra = 'RuntimeDirectory=blink-proxy-web\nRuntimeDirectoryMode=0700\n' if engine == 'caddy' else ''
     return ('[Unit]\nDescription=Blink managed ' + engine + '\nAfter=network-online.target\nWants=network-online.target\n'
@@ -450,9 +513,12 @@ def firewall_prepare(data, transaction, external_rules=None):
     executable = shutil.which('ufw')
     if not executable:
         if data['firewall'] == 'enable':
-            require(shutil.which('apt-get'), '自动安装 UFW 需要 Debian/Ubuntu；其他系统请先安装 ufw')
-            run(['apt-get', 'update'], timeout=180)
-            run(['apt-get', 'install', '-y', 'ufw'], timeout=180)
+            if shutil.which('apk'):
+                run(['apk', 'add', '--no-cache', 'ufw'], timeout=180)
+            else:
+                require(shutil.which('apt-get'), '请先安装 ufw')
+                run(['apt-get', 'update'], timeout=180)
+                run(['apt-get', 'install', '-y', 'ufw'], timeout=180)
         else:
             return previous, ['未安装 UFW；请在主机防火墙与云安全组开放服务端口']
     status = run(['ufw', 'status'])
@@ -490,6 +556,8 @@ def firewall_prepare(data, transaction, external_rules=None):
         ufw_change(rule)
     if not active:
         run(['ufw', '--force', 'enable'])
+        if OPENRC:
+            run(['rc-update', 'add', 'ufw', 'default'])
     warnings.append('UFW 规则已维护；云厂商安全组仍需开放相应端口')
     return desired, warnings
 
@@ -503,9 +571,9 @@ def replace_current(path):
 
 def wait_service(name):
     for _ in range(20):
-        if run(['systemctl', 'is-active', name], optional=True).strip() == 'active':
+        if service(['is-active', name], optional=True).strip() == 'active':
             time.sleep(1)
-            if run(['systemctl', 'is-active', name], optional=True).strip() == 'active':
+            if service(['is-active', name], optional=True).strip() == 'active':
                 return
         time.sleep(0.5)
     raise DeploymentError('服务启动失败：' + name)
@@ -559,7 +627,7 @@ def sync_certificates(data, restart=True):
                 pending = PRIVATE / 'certificate-restarts' / item['id']
                 if not pending.exists():
                     continue
-                run(['systemctl', 'try-restart', service_name(item)])
+                service(['try-restart', service_name(item)])
                 pending.unlink()
 
 
@@ -611,23 +679,23 @@ def recover():
         return
     previous = transaction.get('previous')
     for name in transaction.get('newUnits', []):
-        run(['systemctl', 'disable', '--now', name], optional=True)
+        service(['disable', '--now', name], optional=True)
         (UNITS / name).unlink(missing_ok=True)
     if previous:
         replace_current(previous)
     else:
         (ROOT / 'current').unlink(missing_ok=True)
     for name, content in transaction.get('unitBackups', {}).items():
-        atomic(UNITS / name, content.encode(), 0o644)
-    run(['systemctl', 'daemon-reload'], optional=True)
+        atomic(UNITS / name, content.encode(), UNIT_MODE)
+    service(['daemon-reload'], optional=True)
     if previous:
         previous_data = read_json(Path(previous) / 'desired.json', {'instances': []})
         if caddy_config(previous_data):
-            run(['systemctl', 'enable', 'blink-proxy-web.service'], optional=True)
-            run(['systemctl', 'restart', 'blink-proxy-web.service'], optional=True)
+            service(['enable', WEB_SERVICE], optional=True)
+            service(['restart', WEB_SERVICE], optional=True)
         for item in previous_data['instances']:
-            run(['systemctl', 'enable', '--now', service_name(item)], optional=True)
-            run(['systemctl', 'restart', service_name(item)], optional=True)
+            service(['enable', '--now', service_name(item)], optional=True)
+            service(['restart', service_name(item)], optional=True)
     recover_firewall(transaction)
     atomic(PRIVATE / 'applied.json', canonical(transaction.get('appliedBefore', {'version': 0})))
     (PRIVATE / 'transaction.json').unlink()
@@ -722,10 +790,10 @@ def apply(data, version, deadline):
     if web:
         atomic(generation / 'caddy.json', canonical(web), 0o640, (0, user.pw_gid))
         run([str(binary('caddy')), 'validate', '--config', str(generation / 'caddy.json')], as_proxy=True)
-        desired_units['blink-proxy-web.service'] = unit('caddy', ROOT / 'current' / 'caddy.json')
+        desired_units[WEB_SERVICE] = unit('caddy', ROOT / 'current' / 'caddy.json')
     old_units = [service_name(i) for i in old['instances']]
     if caddy_config(old):
-        old_units.append('blink-proxy-web.service')
+        old_units.append(WEB_SERVICE)
     transaction = {'previous': previous, 'generation': str(generation), 'appliedBefore': applied,
                    'unitBackups': {name: (UNITS / name).read_text() for name in set(old_units) | set(desired_units) if (UNITS / name).exists()},
                    'newUnits': [name for name in desired_units if not (UNITS / name).exists()],
@@ -735,25 +803,25 @@ def apply(data, version, deadline):
         firewall, warnings = firewall_prepare(data, transaction)
         replace_current(generation)
         for name, content in desired_units.items():
-            atomic(UNITS / name, content, 0o644)
-        run(['systemctl', 'daemon-reload'])
+            atomic(UNITS / name, content, UNIT_MODE)
+        service(['daemon-reload'])
         if web:
-            if run(['systemctl', 'is-active', 'blink-proxy-web.service'], optional=True).strip() == 'active':
+            if service(['is-active', WEB_SERVICE], optional=True).strip() == 'active':
                 run([str(binary('caddy')), 'reload', '--address', ADMIN, '--config', str(ROOT / 'current' / 'caddy.json')])
             else:
-                run(['systemctl', 'enable', '--now', 'blink-proxy-web.service'])
-            wait_service('blink-proxy-web.service')
+                service(['enable', '--now', WEB_SERVICE])
+            wait_service(WEB_SERVICE)
             wait_certificates(data, deadline)
         for item in data['instances']:
             check_core(item, generation / (item['id'] + '.json'))
             if item['kind'] == 'reality':
                 tls_probe(item)
-            run(['systemctl', 'enable', service_name(item)])
-            run(['systemctl', 'restart', service_name(item)])
+            service(['enable', service_name(item)])
+            service(['restart', service_name(item)])
             wait_service(service_name(item))
         for name in old_units:
             if name not in desired_units:
-                run(['systemctl', 'disable', '--now', name])
+                service(['disable', '--now', name])
                 (UNITS / name).unlink(missing_ok=True)
         for rule in transaction['firewallBefore']:
             if rule not in firewall:
@@ -774,7 +842,7 @@ def status(data=None, refresh_network=False):
     items = []
     for item in data['instances']:
         row = {'id': item['id'], 'kind': item['kind'], 'port': item['port'],
-               'state': run(['systemctl', 'is-active', service_name(item)], optional=True).strip() or 'inactive'}
+               'state': service(['is-active', service_name(item)], optional=True).strip() or 'inactive'}
         source = certificate_source(item['domain']) if item['kind'] != 'shadowsocks2022' else None
         if source:
             row['certificate'] = certificate_info(source[0])
@@ -790,7 +858,44 @@ def strip_json_comments(text):
     return re.sub(pattern, lambda m: m.group(0) if m.group(0).startswith('"') else '', text)
 
 
-def config_files(args, cwd='/'):
+def proxy_engine(executable):
+    name = Path(executable).name.removesuffix(' (deleted)')
+    if name in ('clash', 'clash-meta') or name.startswith(('mihomo', 'clash-meta-')):
+        return 'mihomo'
+    return next((e for e in ('xray', 'sing-box', 'caddy', 'nginx') if name == e or name.startswith(e + '-')), None)
+
+
+def mihomo_files(args, cwd='/', environment=None):
+    environment = environment or {}
+    options = {}
+    index = 1
+    while index < len(args):
+        name, separator, value = args[index].partition('=')
+        name = name.lstrip('-')
+        if name in ('f', 'd', 'config'):
+            if not separator and index + 1 < len(args):
+                index += 1
+                value = args[index]
+            options[name] = value
+        index += 1
+    # Inline/stdin configurations have no source file to read. Never mistake
+    # -config (base64 data) for a filename or scan an unrelated default file.
+    if options.get('config', environment.get('CLASH_CONFIG_STRING', '')):
+        return []
+    filename = options.get('f', environment.get('CLASH_CONFIG_FILE', ''))
+    if filename == '-':
+        return []
+    directory = options.get('d', environment.get('CLASH_HOME_DIR', ''))
+    if not filename:
+        directory = directory or str(Path(environment.get('XDG_CONFIG_HOME') or str(Path(environment.get('HOME', '/root')) / '.config')) / 'mihomo')
+        filename = str(Path(directory) / 'config.yaml')
+    path = Path(filename)
+    return [path if path.is_absolute() else Path(cwd) / path]
+
+
+def config_files(args, cwd='/', environment=None):
+    if args and proxy_engine(args[0]) == 'mihomo':
+        return mihomo_files(args, cwd, environment)
     result = []
     index = 0
     while index < len(args):
@@ -843,6 +948,90 @@ def merge_configs(engine, files):
     return merged
 
 
+def yaml_config(text):
+    if yaml is None:
+        raise ValueError('PyYAML is required')
+    class Loader(yaml.SafeLoader):
+        def flatten_mapping(self, node):
+            flattened = getattr(self, '_flattened', set())
+            if id(node) in flattened:
+                return
+            self._flattened = flattened
+            merging = getattr(self, '_merging', set())
+            if id(node) in merging:
+                raise ValueError('Recursive YAML merge')
+            self._merging = merging
+            merging.add(id(node))
+            try:
+                size = len(node.value)
+                for key, value in node.value:
+                    if key.tag != 'tag:yaml.org,2002:merge':
+                        continue
+                    children = value.value if isinstance(value, yaml.SequenceNode) else [value]
+                    for child in children:
+                        if isinstance(child, yaml.MappingNode):
+                            self.flatten_mapping(child)
+                            size += len(child.value)
+                            if size > 20000:
+                                raise ValueError('YAML merge exceeds scan limits')
+                super().flatten_mapping(node)
+                self._merge_size = getattr(self, '_merge_size', 0) + len(node.value)
+                if self._merge_size > 20000:
+                    raise ValueError('YAML merge exceeds scan limits')
+                flattened.add(id(node))
+            finally:
+                merging.remove(id(node))
+    Loader.yaml_implicit_resolvers = {key: [(tag, regex) for tag, regex in values
+        if tag not in ('tag:yaml.org,2002:timestamp', 'tag:yaml.org,2002:bool')]
+        for key, values in yaml.SafeLoader.yaml_implicit_resolvers.items()}
+    Loader.add_implicit_resolver('tag:yaml.org,2002:bool', re.compile(r'^(?:true|false|True|False|TRUE|FALSE)$'), list('tTfF'))
+    # Bound nesting before composing YAML, and expansion after loading aliases.
+    try:
+        depth, events = 0, 0
+        for event in yaml.parse(text, Loader=Loader):
+            events += 1
+            if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
+                depth += 1
+            elif isinstance(event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
+                depth -= 1
+            if depth > 32 or events > 20000:
+                raise ValueError('YAML exceeds scan limits')
+        document = yaml.load(text, Loader=Loader)
+    except yaml.YAMLError:
+        raise ValueError('Invalid YAML') from None
+    budget = [20000]
+    def normalize(value, ancestors=()):
+        budget[0] -= 1
+        if budget[0] < 0 or len(ancestors) > 32 or id(value) in ancestors:
+            raise ValueError('Recursive or oversized YAML')
+        if isinstance(value, (dict, list)):
+            parents = (*ancestors, id(value))
+            if isinstance(value, list):
+                return [normalize(child, parents) for child in value]
+            if not all(isinstance(key, str) for key in value):
+                raise ValueError('Configuration keys must be strings')
+            return {key: normalize(child, parents) for key, child in value.items()}
+        if value is None or type(value) in (str, bool, int) or type(value) is float and math.isfinite(value):
+            return value
+        raise ValueError('Unsupported YAML value')
+    if not isinstance(document, dict):
+        raise ValueError('Configuration must be a mapping')
+    return normalize(document)
+
+
+def mihomo_inbounds(config):
+    listeners = config.get('listeners', [])
+    result = [dict(listener, tag=listener.get('name', ''), protocol=listener.get('type', 'unknown'))
+              for listener in listeners if isinstance(listener, dict)] if isinstance(listeners, list) else []
+    listen = config.get('bind-address', '*') if config.get('allow-lan', False) else '127.0.0.1'
+    for field, protocol in [('port', 'http'), ('socks-port', 'socks'), ('mixed-port', 'mixed'), ('redir-port', 'redir'), ('tproxy-port', 'tproxy')]:
+        if config.get(field):
+            result.append({'tag': field, 'protocol': protocol, 'port': config[field], 'listen': listen})
+    if isinstance(config.get('tun'), dict) and config['tun'].get('enable'):
+        result.append({'tag': 'tun', 'protocol': 'tun'})
+    return result
+
+
 def web_includes(engine, paths):
     """Bounded include traversal for ordinary Caddyfile/nginx file layouts."""
     result, seen = [], set()
@@ -886,7 +1075,12 @@ def discovery(engine, key, paths, unit_name='', active=False):
                 continue
             text = resolved.read_text()
             record = {'path': str(path), 'sha256': digest(text.encode())}
-            if path.suffix in ('.json', '.jsonc'):
+            if engine == 'mihomo':
+                if yaml is None:
+                    warnings.append(str(path) + ': 需要 PyYAML，请更新部署器')
+                else:
+                    record['config'] = yaml_config(text)
+            elif path.suffix in ('.json', '.jsonc'):
                 record['config'] = json.loads(strip_json_comments(text))
             elif engine in ('caddy', 'nginx'):
                 # Store readable directives, never inline key material or generic
@@ -899,7 +1093,9 @@ def discovery(engine, key, paths, unit_name='', active=False):
             warnings.append(str(path) + ': 配置无法读取或解析')
     effective = merge_configs(engine, files)
     inbounds = []
-    for inbound in effective.get('inbounds', []):
+    for inbound in mihomo_inbounds(effective) if engine == 'mihomo' else effective.get('inbounds', []):
+        if not isinstance(inbound, dict):
+            continue
         protocol = inbound.get('type', inbound.get('protocol', 'unknown'))
         stream = inbound.get('streamSettings', {})
         tls = inbound.get('tls', {})
@@ -940,21 +1136,27 @@ def discovery(engine, key, paths, unit_name='', active=False):
                 walk(child)
     walk(effective)
     fingerprint = digest(canonical([(f['path'], f['sha256']) for f in files]))
+    metadata = {}
+    if engine == 'mihomo':
+        metadata = {'mode': effective.get('mode', 'rule'),
+                    'proxyCount': len(effective.get('proxies', [])) if isinstance(effective.get('proxies'), list) else 0,
+                    'proxyGroupCount': len(effective.get('proxy-groups', [])) if isinstance(effective.get('proxy-groups'), list) else 0,
+                    'ruleCount': len(effective.get('rules', [])) if isinstance(effective.get('rules'), list) else 0}
     return {'key': key, 'summary': {'engine': engine, 'unit': unit_name, 'active': active,
         'paths': [f['path'] for f in files], 'fingerprint': fingerprint, 'inbounds': inbounds,
-        'certificates': certificates, 'listenPorts': sorted(listen_ports), 'warnings': warnings, 'managed': unit_name.startswith('blink-proxy-')},
+        'certificates': certificates, 'listenPorts': sorted(listen_ports), 'warnings': warnings, 'managed': unit_name.startswith('blink-proxy-'), **metadata},
         'configuration': {'files': files, 'effective': effective}}
 
 
 def scan():
     discoveries, seen, warnings = [], set(), []
-    units = run(['systemctl', 'list-units', '--type=service', '--all', '--no-pager', '--plain', '--no-legend'], optional=True)
+    units = '' if OPENRC else run(['systemctl', 'list-units', '--type=service', '--all', '--no-pager', '--plain', '--no-legend'], optional=True)
     pid_units = {}
     for line in units.splitlines():
         unit_name = line.split()[0] if line.split() else ''
         if not re.fullmatch(r'[a-zA-Z0-9_.@:-]+\.service', unit_name):
             continue
-        if not any(name in line.lower() for name in ('xray', 'sing-box', 'caddy', 'nginx', 'x-ui', 'blink-proxy')):
+        if not any(name in line.lower() for name in ('xray', 'sing-box', 'caddy', 'nginx', 'x-ui', 'blink-proxy', 'mihomo', 'clash')):
             continue
         info = run(['systemctl', 'show', unit_name, '--property=MainPID,ExecStart,WorkingDirectory,Environment'], optional=True)
         pid = re.search(r'^MainPID=(\d+)', info, re.M)
@@ -965,22 +1167,30 @@ def scan():
         if argv and (not pid or pid[1] == '0'):
             try:
                 args = shlex.split(argv[1])
-                engine = next((e for e in ('xray', 'sing-box', 'caddy', 'nginx') if e in Path(args[0]).name), None)
+                engine = proxy_engine(args[0])
                 cwd = re.search(r'^WorkingDirectory=(.*)$', info, re.M)
-                paths = config_files(args, cwd[1] if cwd and cwd[1] else '/')
+                env_line = re.search(r'^Environment=(.*)$', info, re.M)
+                env = dict(v.split('=', 1) for v in shlex.split(env_line[1] if env_line else '') if '=' in v)
+                paths = config_files(args, cwd[1] if cwd and cwd[1] else '/', env)
                 if engine and paths:
                     discoveries.append(discovery(engine, unit_name, paths, unit_name))
                     seen.update(str(p.resolve()) for p in paths)
             except (ValueError, IndexError):
                 warnings.append(unit_name + ': 启动参数需要手动检查')
-    for proc in Path('/proc').glob('[0-9]*'):
+    for proc in PROC.glob('[0-9]*'):
         try:
             args = (proc / 'cmdline').read_bytes().decode(errors='replace').strip('\0').split('\0')
             executable = Path(os.readlink(proc / 'exe')).name
-            engine = next((e for e in ('xray', 'sing-box', 'caddy', 'nginx') if executable == e or executable.startswith(e + '-')), None)
+            engine = proxy_engine(executable)
             if not engine:
                 continue
-            paths = config_files(args, os.readlink(proc / 'cwd'))
+            env = {}
+            if engine == 'mihomo':
+                env = dict(v.split('=', 1) for v in (proc / 'environ').read_bytes().decode(errors='replace').split('\0') if '=' in v)
+            paths = config_files(args, os.readlink(proc / 'cwd'), env)
+            if engine == 'mihomo' and not paths:
+                warnings.append('Mihomo 使用内联或标准输入配置，无法从文件扫描')
+                continue
             if engine == 'xray':
                 environment = (proc / 'environ').read_bytes().decode(errors='replace').split('\0')
                 if not any(a.startswith('-confdir') for a in args):
@@ -1004,10 +1214,17 @@ def scan():
         'sing-box': ['/etc/sing-box/*.json', '/usr/local/etc/sing-box/*.json'],
         'caddy': ['/etc/caddy/Caddyfile', '/etc/caddy/*.json'],
         'nginx': ['/etc/nginx/nginx.conf', '/etc/nginx/conf.d/*.conf', '/etc/nginx/sites-enabled/*'],
+        'mihomo': ['/etc/mihomo/*.yaml', '/etc/mihomo/*.yml', '/etc/mihomo/*.json', '/etc/clash/*.yaml', '/etc/clash/*.yml',
+                   '/usr/local/etc/mihomo/*.yaml', '/root/.config/mihomo/config.yaml', '/home/*/.config/mihomo/config.yaml',
+                   '/root/.config/clash/config.yaml', '/etc/ShellCrash/config.yaml'],
     }.items():
         paths = [Path(p) for pattern in patterns for p in glob.glob(pattern) if str(Path(p).resolve()) not in seen]
         if paths:
-            discoveries.append(discovery(engine, engine + ':files', paths))
+            if engine == 'mihomo':
+                for path in dict.fromkeys(paths):
+                    discoveries.append(discovery(engine, engine + ':' + str(path), [path]))
+            else:
+                discoveries.append(discovery(engine, engine + ':files', paths))
     # Record local-target associations without guessing credential-based links.
     for item in discoveries:
         targets = set()

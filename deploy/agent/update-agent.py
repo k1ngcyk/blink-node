@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Root-owned updater, independent of the monitored agent and its service cgroup."""
 import argparse
+import datetime
 import fcntl
 import hashlib
 import json
@@ -217,6 +218,12 @@ def unpack_binary(archive, destination):
 
 
 class Service:
+    def logs(self, invocation):
+        return subprocess.run(
+            ['journalctl', f'_SYSTEMD_INVOCATION_ID={invocation}', '--no-pager', '-o', 'cat', '-n', '100'],
+            check=True, capture_output=True, text=True, timeout=10,
+        ).stdout
+
     def properties(self):
         result = subprocess.run(
             ['systemctl', 'show', 'blink-agent', '--property=ActiveState,SubState,InvocationID,MainPID'],
@@ -242,12 +249,8 @@ class Service:
             if invocation is not None and current != invocation:
                 return False  # A crash/restart is not a successful update.
             invocation = current
-            result = subprocess.run(
-                ['journalctl', f'_SYSTEMD_INVOCATION_ID={current}', '--no-pager', '-o', 'cat', '-n', '100'],
-                check=True, capture_output=True, text=True, timeout=10,
-            )
             connected = False
-            for line in result.stdout.splitlines():
+            for line in self.logs(current).splitlines():
                 try:
                     event = json.loads(line)
                 except ValueError:
@@ -259,6 +262,49 @@ class Service:
                 return True
             time.sleep(1)
         return False
+
+
+class OpenRCService(Service):
+    def properties(self):
+        status = subprocess.run(['rc-service', 'blink-agent', 'status'], capture_output=True, timeout=10)
+        if status.returncode:
+            return {'ActiveState': 'inactive'}
+        result = subprocess.run(['rc-service', 'blink-agent', 'instance'], check=True, capture_output=True, text=True, timeout=10)
+        identity = result.stdout.strip()
+        pid, _, started = identity.partition(':')
+        if not pid.isdigit() or not started:
+            return {'ActiveState': 'inactive'}
+        try:
+            fields = Path('/proc', pid, 'stat').read_text().rsplit(')', 1)[1].split()
+            args = Path('/proc', pid, 'cmdline').read_bytes().split(b'\0')
+            if fields[0] == 'Z' or args[0] != os.fsencode(BINARY):
+                return {'ActiveState': 'inactive'}
+        except (OSError, IndexError):
+            return {'ActiveState': 'inactive'}
+        return {'ActiveState': 'active', 'SubState': 'running', 'MainPID': pid, 'InvocationID': pid + ':' + fields[19]}
+
+    def restart(self):
+        subprocess.run(['rc-service', 'blink-agent', 'restart'], check=True, timeout=40)
+
+    def logs(self, invocation):
+        # start_pre truncates on explicit restart. Filter by kernel start time
+        # as well, because an automatic supervisor respawn reuses the log.
+        ticks = int(invocation.partition(':')[2])
+        boot = next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime '))
+        started = boot + ticks / os.sysconf('SC_CLK_TCK')
+        with Path('/var/log/blink-agent/current.log').open('rb') as file:
+            file.seek(max(0, os.fstat(file.fileno()).st_size - 65536))
+            lines = file.read(65536).decode(errors='replace').splitlines()
+        result = []
+        for line in lines:
+            try:
+                event = json.loads(line)
+                timestamp = datetime.datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')).timestamp()
+                if timestamp >= started:
+                    result.append(line)
+            except (ValueError, KeyError, TypeError):
+                continue
+        return '\n'.join(result)
 
 
 def recover(directory, binary, service, state):
@@ -273,7 +319,7 @@ def recover(directory, binary, service, state):
 
 
 def update(config=CONFIG, binary=BINARY, directory=STATE_DIR, service=None, check=False, retry_failed=False):
-    service = service or Service()
+    service = service or (OpenRCService() if Path('/sbin/openrc-run').exists() and not Path('/run/systemd/system').exists() else Service())
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if directory.is_symlink():
         raise UpdateError('Update state directory must not be a symlink')

@@ -34,6 +34,7 @@ remote command field exists. PTY is a separately enabled, owner-authorized capab
   job. Scans contain encrypted-at-rest discoveries; apply results contain allowlisted status.
 - `proxy.status {status}`: bounded, credential-free managed service / certificate status, every minute. Optional `checkedAt`, `ufwState` (`active` / `inactive` / `not_installed` / `error`), `ufw` verbose output, and `network {checkedAt, addresses: [{address, source: "interface" | "ip.sb", interface?}]}` describe actual node state. At most one public IPv4 and one public IPv6 are accepted; initial observations populate empty host addresses without overwriting saved values. Address discovery is cached for five minutes and refreshed by explicit scans. Client endpoints use these IPs; TLS/SNI retains the configured certificate domain.
 - Exit references may identify managed SS2022 instances or explicitly registered existing Shadowsocks listeners from encrypted scan snapshots. Imported exits use the same typed `exits` payload, including validated cipher/password (server:user for multi-user SS2022), but never enter local `instances` or schedule source-service deployment. Rescans invalidate changed/missing source configurations; source IP changes redeploy referencing entrances.
+- Mihomo scans retain bounded, safely parsed YAML snapshots under `configuration.effective`, with `listeners`, proxy/group/rule counts and credential-free inbound summaries. Only compatible Shadowsocks `listeners` are exit candidates; remote `proxies` are not local services. Authentication and legacy inline credential fields are redacted in configuration views.
 
 ## Master → Agent
 
@@ -78,3 +79,5 @@ configuration, units and owned firewall rules after failure/interruption. Succes
 redelivery verifies its payload fingerprint. Cloudflare changes and multi-node deployments are
 not globally atomic: failures are visible and a new apply reconciles desired configuration.
 Proxy operations and credential access require owner authorization and recent elevation.
+
+The same protocol runs on systemd and Alpine/OpenRC. OpenRC supervises the Agent and root manager independently; managed cores run as `blink-proxy` with the low-port binding capability. OpenRC updates run through crond and require a stable supervised child plus a fresh Master welcome before accepting a binary replacement.

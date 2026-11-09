@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+description="Blink Node typed proxy deployment manager"
+supervisor=supervise-daemon
+command=/usr/bin/python3
+command_args="-I /usr/local/libexec/blink-proxy/manager.py serve"
+command_user=root:blink-agent
+pidfile=/run/blink-proxy/supervisor.pid
+respawn_delay=3
+respawn_max=10
+respawn_period=60
+retry="TERM/30/KILL/5"
+umask=0077
+output_log=/var/log/blink-proxy-manager/current.log
+error_log=/var/log/blink-proxy-manager/current.log
+depend() {
+    use net
+    after bootmisc
+}
+start_pre() {
+    checkpath --directory --mode 0750 --owner root:blink-agent /run/blink-proxy /var/log/blink-proxy-manager
+    checkpath --file-truncate --mode 0640 --owner root:blink-agent "$output_log"
+}

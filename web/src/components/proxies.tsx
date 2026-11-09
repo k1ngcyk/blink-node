@@ -34,6 +34,10 @@ type Imported = {
     warnings: string[];
     managed: boolean;
     inbounds: { protocol: string; port: number; reality: boolean }[];
+    mode?: string;
+    proxyCount?: number;
+    proxyGroupCount?: number;
+    ruleCount?: number;
   };
 };
 type Exit = {
@@ -534,10 +538,19 @@ export function Proxies({ serverId }: { serverId?: string }) {
                   <span className="subline">
                     {item.summary.active ? "运行中" : "配置文件"} ·{" "}
                     {item.summary.inbounds
-                      .map((i) => `${i.reality ? "REALITY" : i.protocol}:${i.port}`)
+                      .map(
+                        (i) => `${i.reality ? "REALITY" : i.protocol}${i.port ? `:${i.port}` : ""}`,
+                      )
                       .join(" / ") || item.summary.engine}
                   </span>
                   <span className="subline mono">{item.summary.paths.join(", ")}</span>
+                  {item.summary.engine === "mihomo" && (
+                    <span className="subline">
+                      Mihomo · {item.summary.mode} · {item.summary.proxyCount ?? 0} 个代理 ·{" "}
+                      {item.summary.proxyGroupCount ?? 0} 个策略组 · {item.summary.ruleCount ?? 0}{" "}
+                      条规则
+                    </span>
+                  )}
                   {item.summary.warnings.map((w) => (
                     <span className="subline" key={w}>
                       {w}
@@ -545,16 +558,17 @@ export function Proxies({ serverId }: { serverId?: string }) {
                   ))}
                 </div>
                 <div className="row">
-                  {!item.summary.managed && ["xray", "sing-box"].includes(item.summary.engine) && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={busy || jobsRunning}
-                      onClick={() => setImporting(item)}
-                    >
-                      添加为出口
-                    </Button>
-                  )}
+                  {!item.summary.managed &&
+                    ["xray", "sing-box", "mihomo"].includes(item.summary.engine) && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy || jobsRunning}
+                        onClick={() => setImporting(item)}
+                      >
+                        添加为出口
+                      </Button>
+                    )}
                   <Button
                     size="sm"
                     variant="outline"

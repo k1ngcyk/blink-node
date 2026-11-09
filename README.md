@@ -78,8 +78,8 @@ TOTP 有重放保护，同一个验证码只能成功使用一次；需要再次
 4. 等待几秒，面板将显示在线和监控数据。
 
 安装器自动识别 x86_64 / ARM64，从你的 Master 的 `/downloads/agent/v0.1.0/` 下载静态 musl 二进制，
-核对 SHA256、创建服务用户、写入配置、消费单次凭证并启动 systemd；启用终端时自动配置 root 服务 override，同时默认启用自动更新。
-需要 `curl`、CA 证书、Python 3.9+ 和正在运行的 systemd；例如 Debian / Ubuntu 可先安装 `curl ca-certificates python3`。
+核对 SHA256、创建服务用户、写入配置、消费单次凭证并启动 systemd 或 OpenRC；启用终端时自动配置 root 服务身份，同时默认启用自动更新。
+支持 Alpine / OpenRC（x86_64、ARM64），面板命令从 `/bin/sh` 启动，自动通过 `apk` 安装 Bash、curl、CA 证书、Python、PyYAML 及代理管理依赖。Alpine 主机需要已运行 OpenRC；Debian / Ubuntu 需要运行 systemd，可先安装 `curl ca-certificates python3`。Mihomo 扫描依赖 PyYAML，部署器安装时自动安装发行版对应软件包。
 安装不依赖目标服务器访问 GitHub，也无需 Rust 编译环境。手动调用安装器时可传入 `--no-auto-update` 关闭自动更新。
 
 接入凭证有效 15 分钟；它通过 stdin 和临时 0600 文件传递，不进入 curl URL 或安装器的 argv。
@@ -88,10 +88,11 @@ TOTP 有重放保护，同一个验证码只能成功使用一次；需要再次
 
 安装器拒绝覆盖已有配置或身份。注册失败会撤销本次写入的文件，可生成新命令重试；
 注册后服务启动失败则保留身份，使用 `journalctl -u blink-agent` 排查后 `systemctl restart blink-agent`。
+Alpine 对应使用 `rc-service blink-agent status`、`rc-service blink-agent restart`，日志位于 `/var/log/blink-agent/current.log`；代理部署器日志位于 `/var/log/blink-proxy-manager/current.log`。
 
 ### 手动安装
 
-主流 systemd Linux，内核指标来自宿主机。Agent 推荐作为原生服务运行。
+支持主流 systemd Linux 与 Alpine / OpenRC，内核指标来自宿主机。Agent 推荐作为原生服务运行。
 在对应 CPU 架构上构建，或从 Master 的 `/downloads/agent/v0.1.0/` 取得对应架构的压缩包，
 用同目录的 `SHA256SUMS` 核对后解压：
 
@@ -120,6 +121,7 @@ sudo systemctl status blink-agent
 ```
 
 Agent 仅主动访问 Master，无需开放入站端口。默认普通系统用户、只读系统视图、独立私有状态目录。
+Alpine 手动安装先准备 Bash、Python、curl、CA 证书和 coreutils；服务使用 `rc-update add blink-agent default` 设置开机启动，使用 `rc-service blink-agent start` 启动。
 修改配置后 `sudo systemctl restart blink-agent`。
 手动升级使用相同用户 / 状态目录，替换二进制后重启；自动升级见下节。
 
@@ -129,11 +131,12 @@ Agent 仅主动访问 Master，无需开放入站端口。默认普通系统用�
 
 ### Agent 自动更新
 
-新的一键安装默认启用 `blink-agent-update.timer`：启动后约 3 分钟首次检查，之后每次结束约 15 分钟再检查，
+systemd 的一键安装默认启用 `blink-agent-update.timer`：启动后约 3 分钟首次检查，之后每次结束约 15 分钟再检查，
 附加最多 2 分钟随机延迟，避免节点同时下载。更新源固定为本机配置 `server_url` 对应 Master 的
 `/downloads/agent/latest.json`；发布构建会自动生成该清单并随 Web 镜像部署。
+Alpine 使用 OpenRC 的 crond 和 `/etc/periodic/15min/blink-agent-update`，每 15 分钟检查；健康检查同时验证监督进程身份和本次启动日志中的 Master 连接成功记录，失败时同样回滚。删除该 periodic 脚本即可暂停定时更新。
 
-- 更新器由独立的 root systemd 服务运行，监控 Agent 仍可保持普通用户身份。
+- 更新器由独立的 root systemd 服务或 crond 运行，监控 Agent 仍可保持普通用户身份。
 - HTTPS 校验证书，不接受下载重定向；下载有时间和大小上限，校验压缩包及解压后二进制的 SHA256、版本和架构。
 - 以二进制 SHA256 识别变化，因此同版本重新构建也可更新；拒绝低于当前版本号的发布。
 - 原子替换二进制并重启 Agent；验证新进程至少运行 10 秒且已连接 Master，最长等待 60 秒。
@@ -146,8 +149,7 @@ Master 尚未部署更新清单时，更新器记录提示并等下一周期，�
 
 #### 已安装节点启用自动更新
 
-当前 0.1.0 节点可直接启用，无需重新注册。将以下四个文件复制到服务器同一目录（新版 Agent 压缩包也包含）：
-`enable-auto-update.sh`、`update-agent.py`、`blink-agent-update.service`、`blink-agent-update.timer`，均位于 `deploy/agent/`。
+当前 0.1.0 节点可直接启用，无需重新注册。从已核对 SHA256 的新版 Agent 压缩包解压安装文件到同一目录，保留 `service-platform.sh`、`enable-auto-update.sh`、`update-agent.py`、`blink-agent-update.service`、`blink-agent-update.timer` 和 `blink-agent-update.cron`。
 安装 Python 3.9+ 和 CA 证书后执行：
 
 ```bash
@@ -170,13 +172,13 @@ sudo /usr/local/libexec/blink-agent-update --retry-failed
 
 ### 网页终端权限
 
-面板一键安装时勾选 **启用网页终端（root 用户）**，安装器会同时设置本地配置与 systemd override。
+面板一键安装时勾选 **启用网页终端（root 用户）**，安装器会同时设置本地配置与 systemd override；OpenRC 使用 `/etc/conf.d/blink-agent` 中的 `blink_user=root`。
 未勾选时终端关闭，Agent 仍以普通 `blink-agent` 用户运行。
 
 #### 已安装节点切换为 root
 
-将 `deploy/agent/enable-root-terminal.sh` 和 `deploy/agent/root-terminal.conf.example` 复制到目标服务器同一目录，
-或从新版 Agent 发布压缩包解压这两个文件，然后在该目录执行：
+将 `deploy/agent/enable-root-terminal.sh`、`deploy/agent/root-terminal.conf.example` 和 `deploy/agent/service-platform.sh` 复制到目标服务器同一目录，
+或从新版 Agent 发布压缩包解压这些文件，然后在该目录执行：
 
 ```bash
 sudo bash enable-root-terminal.sh
@@ -241,7 +243,7 @@ ICMP 依赖系统 `ping` 命令与允许的 ping socket 权限；必要时为服
 
 新安装包自动配置 `blink-proxy-manager.service`。部署器以 root 运行，仅通过受限 Unix socket 接受类型化配置任务；代理内核以独立 `blink-proxy` 用户运行，监控 Agent 可继续使用普通用户。
 
-存量节点先更新 Agent，再从同版本、已核对 SHA256 的发布包解压 `enable-proxy.sh`、`proxy-manager.py`、`proxy-assets.json` 和 `blink-proxy-manager.service`，以 root 运行 `bash enable-proxy.sh`。无需重新注册。Agent 自动更新器只更新 Agent 二进制，部署器后续升级仍需重新执行该脚本。
+存量节点先更新 Agent，再从同版本、已核对 SHA256 的发布包解压 `enable-proxy.sh`、`service-platform.sh`、`proxy-manager.py`、`proxy-assets.json`、`blink-proxy-manager.service` 和 `blink-proxy-manager.openrc`，以 root 运行 `bash enable-proxy.sh`。无需重新注册。Agent 自动更新器只更新 Agent 二进制，部署器后续升级仍需重新执行该脚本。
 
 存量 Master 升级时同步更新 `deploy/compose.yml`，让 Web 服务接入 `egress` 网络，以访问 Cloudflare API 和解析伪装上游域名。
 
@@ -254,6 +256,11 @@ ICMP 依赖系统 `ping` 命令与允许的 ping socket 权限；必要时为服
 ### 扫描、部署与恢复
 
 首次接入自动扫描 Xray、sing-box、Caddy、Nginx 的运行参数、常见配置目录、多文件 JSON/JSONC 及普通 Web include；本地目标按端口关联 Web 候选。扫描快照加密保存，查看时隐藏结构化密钥。外部服务以只读方式导入；不自动接管。容器命名空间、自定义启动器、动态配置和复杂变量/include 需要人工核对，合并视图不替代内核实际配置。
+
+Mihomo / Clash Meta 也可扫描：读取运行进程的 `-f`、`-d`、`CLASH_CONFIG_FILE`、`CLASH_HOME_DIR` 与常见 YAML/YML 配置路径，支持 YAML 锚点及合并。面板展示监听项、代理数量、策略组数量和规则数量。配置中的 `listeners` 若为兼容的 Shadowsocks 服务，可添加为已有出口；`proxies` 中的远端节点不作为本机监听服务导入。内联配置、标准输入或加密配置会提示人工核对；扫描不会调用外部控制 API 或更新原服务。
+
+Alpine 的管理服务由 OpenRC 监督，代理内核仍以 `blink-proxy` 用户运行，仅授予绑定低端口的能力；配置应用、故障回滚和已有出口 UFW 同步沿用同一任务协议。
+Alpine 自动选择官方静态 musl 版 sing-box，和其他内核一样从 Master 下载并校验固定 SHA256。
 
 部署执行内核配置校验，写入独立配置代次，启用服务后检查状态。失败恢复原配置、服务与所管理的防火墙规则；断线按同一任务 ID 重投，节点持久化结果避免重复执行。依赖出口先应用，入口随后启动；跨节点不是分布式原子事务，任务失败后使用“重新应用配置”协调重试。运行状态和证书信息约每分钟回报。
 

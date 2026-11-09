@@ -47,7 +47,8 @@ def main():
     manifest = json.loads((ROOT / 'deploy/agent/proxy-assets.json').read_text())
     output = ROOT / 'web/public/downloads/proxy'
     output.mkdir(parents=True, exist_ok=True)
-    for engine in manifest.values():
+    variants = [variant for engine in manifest.values() for variant in (engine, engine.get('musl')) if variant]
+    for engine in variants:
         for arch in ('amd64', 'arm64'):
             asset = engine[arch]
             target = output / asset['file']

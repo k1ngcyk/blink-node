@@ -88,7 +88,7 @@ package = Path('/tmp/root-terminal-package')
 package.mkdir()
 arch = 'arm64' if os.uname().machine == 'aarch64' else 'amd64'
 with tarfile.open(release / f'blink-agent-linux-{arch}.tar.gz') as archive:
-    for name in ['enable-root-terminal.sh', 'root-terminal.conf.example', 'enable-auto-update.sh', 'update-agent.py', 'blink-agent-update.service', 'blink-agent-update.timer']:
+    for name in ['enable-root-terminal.sh', 'root-terminal.conf.example', 'enable-auto-update.sh', 'update-agent.py', 'blink-agent-update.service', 'blink-agent-update.timer', 'service-platform.sh']:
         (package / name).write_bytes(archive.extractfile(name).read())
 for terminal, auto_update in ((False, True), (True, True), (False, False)):
     state['token'] = secrets.token_urlsafe(32)

@@ -547,6 +547,85 @@ try {
     0,
     "existing source remains an unmanaged service",
   );
+  const mihomoPassword = randomBytes(32).toString("base64");
+  const mihomoSnapshot = {
+    discoveries: [
+      {
+        key: "mihomo:/etc/mihomo/config.yaml",
+        summary: { engine: "mihomo", active: true, managed: false, proxyCount: 1 },
+        configuration: {
+          effective: {
+            authentication: ["user:mihomo-login-secret"],
+            listeners: [
+              {
+                name: "Mihomo SS",
+                type: "shadowsocks",
+                listen: "0.0.0.0",
+                port: 17503,
+                cipher: "2022-blake3-aes-256-gcm",
+                password: mihomoPassword,
+                udp: true,
+              },
+            ],
+            proxies: [
+              {
+                name: "remote",
+                type: "ss",
+                server: "remote.example",
+                port: 443,
+                password: "mihomo-remote-secret",
+              },
+            ],
+          },
+        },
+      },
+    ],
+  };
+  await api(`hosts/${stranger}/scan`, "POST", {});
+  await complete((await dispatch())[0], mihomoSnapshot);
+  const [mihomoImport] =
+    await sql`SELECT * FROM proxy_imports WHERE server_id=${stranger} AND source_key=${mihomoSnapshot.discoveries[0].key}`;
+  const mihomoView = JSON.stringify(await api(`imports/${mihomoImport.id}`));
+  for (const secret of [mihomoPassword, "mihomo-login-secret", "mihomo-remote-secret"]) {
+    assert(!mihomoView.includes(secret));
+    assert(!mihomoImport.encrypted_snapshot.includes(secret));
+  }
+  const mihomoCandidates = await api(`imports/${mihomoImport.id}/exits`);
+  assert.equal(mihomoCandidates.length, 1, "remote Mihomo proxies are not local exits");
+  const mihomoExit = await api(`imports/${mihomoImport.id}/exits`, "POST", {
+    candidateKey: mihomoCandidates[0].key,
+    name: "Mihomo existing exit",
+  });
+  assert.equal((await dispatch()).length, 0);
+  const mihomoEntrance = await api("instances", "POST", {
+    ...externalInput,
+    defaultOutbound: mihomoExit.id,
+    rules: [],
+  });
+  const mihomoTasks = await drain();
+  assert.deepEqual(
+    mihomoTasks.map((task) => task.operation),
+    ["firewall", "apply", "firewall"],
+  );
+  assert.equal(mihomoTasks[1].serverId, entry);
+  assert.equal(
+    (mihomoTasks[1].payload as { instances: { exits: { password: string }[] }[] }).instances[0]
+      .exits[0].password,
+    mihomoPassword,
+  );
+  mihomoSnapshot.discoveries[0].configuration.effective.listeners[0].password =
+    randomBytes(32).toString("base64");
+  await api(`hosts/${stranger}/scan`, "POST", {});
+  await complete((await dispatch())[0], mihomoSnapshot);
+  assert.equal(
+    (await api("exits")).find((item: { id: string }) => item.id === mihomoExit.id).state,
+    "stale",
+  );
+  await assert.rejects(api(`hosts/${entry}/apply`, "POST", {}), /已有服务出口不可用/);
+  await api(`instances/${mihomoEntrance.id}`, "DELETE");
+  await drain();
+  await api(`exits/${mihomoExit.id}`, "DELETE");
+  await drain();
   const { ensureDns } = await import("../src/server/cloudflare");
   const nativeFetch = globalThis.fetch;
   const zoneId = "a".repeat(32),

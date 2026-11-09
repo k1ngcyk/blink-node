@@ -6,6 +6,53 @@ import { importedExitCandidates } from "../src/server/proxy-imports";
 const key = (size = 32) => randomBytes(size).toString("base64");
 const snapshot = (inbound: unknown) => ({ effective: { inbounds: [inbound] } });
 
+test("Mihomo imports server listeners with cipher and UDP settings, never remote proxies", () => {
+  const listener = {
+    name: "SS ingress",
+    type: "shadowsocks",
+    port: 17501,
+    listen: "*",
+    cipher: "2022-blake3-aes-256-gcm",
+    password: key(),
+    udp: true,
+  };
+  const data = {
+    effective: {
+      listeners: [listener],
+      proxies: [{ type: "ss", server: "remote.example", port: 443, password: "outbound-secret" }],
+    },
+  };
+  const [candidate] = importedExitCandidates("mihomo", data);
+  assert.equal(candidate.key, "0:-1");
+  assert.equal(candidate.label, "SS ingress");
+  assert.equal(candidate.reason, "");
+  assert.equal(candidate.password, listener.password);
+  assert.equal(candidate.udp, true);
+  assert.equal(
+    importedExitCandidates("mihomo", { effective: { proxies: data.effective.proxies } }).length,
+    0,
+  );
+  for (const change of [
+    { "shadow-tls": { enable: true } },
+    { "simple-obfs": { enable: true } },
+    { proxy: "upstream" },
+    { rule: "subrule" },
+    { port: "8000-9000" },
+    { listen: "127.0.0.1" },
+  ]) {
+    assert(
+      importedExitCandidates("mihomo", {
+        effective: { listeners: [{ ...listener, ...change }] },
+      })[0].reason,
+    );
+  }
+  const [tcp] = importedExitCandidates("mihomo", {
+    effective: { listeners: [{ ...listener, udp: false, "shadow-tls": { enable: false } }] },
+  });
+  assert.equal(tcp.udp, false);
+  assert.equal(tcp.reason, "");
+});
+
 test("existing Xray SS2022 single-user config becomes a connection candidate", () => {
   const password = key();
   const [candidate] = importedExitCandidates(

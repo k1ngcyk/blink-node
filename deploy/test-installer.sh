@@ -9,4 +9,10 @@ for arch in amd64 arm64; do
     -f "$root/deploy/agent/Dockerfile.test" -t "blink-installer-test:$arch" "$root"
   docker run --rm --platform "linux/$arch" --network none --security-opt no-new-privileges:true \
     -e AGENT_VERSION="$version" "blink-installer-test:$arch"
+  docker buildx build --platform "linux/$arch" --load --target alpine-installer-test \
+    --build-arg "HTTP_PROXY=${BLINK_BUILD_PROXY:-${HTTP_PROXY:-}}" --build-arg "HTTPS_PROXY=${BLINK_BUILD_PROXY:-${HTTPS_PROXY:-}}" --build-arg NO_PROXY \
+    -f "$root/deploy/agent/Dockerfile.test" -t "blink-alpine-test:$arch" "$root"
+  docker run --rm --init --platform "linux/$arch" --network none --security-opt no-new-privileges:true \
+    --sysctl net.ipv4.ip_unprivileged_port_start=1024 \
+    -e AGENT_VERSION="$version" "blink-alpine-test:$arch"
 done

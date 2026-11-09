@@ -20,6 +20,12 @@ test("copied install command carries the token on stdin, never curl/installer ar
   try {
     // Execute the actual generated shell command with a local download fixture.
     // Both subprocess wrappers reject a token in argv before running anything.
+    writeFileSync(join(dir, "id"), "#!/bin/sh\nprintf '0\\n'\n", { mode: 0o755 });
+    writeFileSync(
+      join(dir, "sh"),
+      `#!/bin/sh\ncase "$*" in *"$EXPECTED_TOKEN"*) exit 79;; esac\nexec /bin/sh "$@"\n`,
+      { mode: 0o755 },
+    );
     writeFileSync(
       join(dir, "bash"),
       `#!/bin/bash\ncase "$*" in *"$EXPECTED_TOKEN"*) exit 80;; esac\nexec /bin/bash "$@"\n`,
@@ -36,7 +42,7 @@ test("copied install command carries the token on stdin, never curl/installer ar
       `#!/bin/bash\nIFS= read -r received\n[[ "$received" == "$EXPECTED_TOKEN" ]] || exit 83\n[[ "$*" == '--server https://blink.example.com --enable-terminal' ]] || exit 84\nprintf OK > "$RESULT"\n`,
     );
     execFileSync(
-      "/bin/bash",
+      "/bin/sh",
       ["-c", agentInstallCommand("https://blink.example.com", secret, true)],
       {
         env: {

@@ -27,19 +27,29 @@ export type ImportedExitCandidate = {
 };
 
 export function importedExitCandidates(engine: string, snapshot: unknown): ImportedExitCandidate[] {
-  if (engine !== "xray" && engine !== "sing-box") return [];
+  if (!["xray", "sing-box", "mihomo"].includes(engine)) return [];
   const result: ImportedExitCandidate[] = [];
-  for (const [index, value] of array(object(object(snapshot).effective).inbounds)
+  const config = object(object(snapshot).effective);
+  for (const [index, value] of array(engine === "mihomo" ? config.listeners : config.inbounds)
     .slice(0, 100)
     .entries()) {
     const inbound = object(value);
     if ((inbound.protocol ?? inbound.type) !== "shadowsocks") continue;
-    const settings = engine === "xray" ? object(inbound.settings) : inbound;
+    const settings =
+      engine === "xray"
+        ? object(inbound.settings)
+        : engine === "mihomo"
+          ? {
+              ...inbound,
+              method: inbound.cipher,
+              network: inbound.udp === true ? "tcp,udp" : "tcp",
+            }
+          : inbound;
     const users = array(settings.clients ?? settings.users).slice(0, 100);
     const serverMethod = text(settings.method);
     const is2022 = serverMethod.startsWith("2022-");
     const port = Number(inbound.port ?? inbound.listen_port);
-    const listen = text(inbound.listen);
+    const listen = engine === "mihomo" && inbound.listen === "*" ? "0.0.0.0" : text(inbound.listen);
     const stream = object(inbound.streamSettings);
     const network = settings.network;
     const supports = (name: string) =>
@@ -66,6 +76,14 @@ export function importedExitCandidates(engine: string, snapshot: unknown): Impor
         (stream.security && stream.security !== "none") ||
         settings.plugin ||
         inbound.detour ||
+        (engine === "mihomo" &&
+          (["simple-obfs", "shadow-tls", "res-tls", "jls-config", "kcp-tun"].some(
+            (key) => object(inbound[key]).enable === true,
+          ) ||
+            inbound["mux-option"] ||
+            users.length ||
+            inbound.rule ||
+            (inbound.proxy && inbound.proxy !== "DIRECT"))) ||
         array(settings.destinations).length
       )
         reason = "暂不支持此服务的附加传输或中继配置";
@@ -94,7 +112,7 @@ export function importedExitCandidates(engine: string, snapshot: unknown): Impor
       result.push({
         key: `${index}:${users.length ? userIndex : -1}`,
         label: [
-          text(inbound.tag) || `Shadowsocks :${port}`,
+          text(inbound.tag ?? inbound.name) || `Shadowsocks :${port}`,
           text(user.name ?? user.email) || (users.length ? `用户 ${userIndex + 1}` : ""),
         ]
           .filter(Boolean)

@@ -107,9 +107,25 @@ test("import views redact nested authentication fields", () => {
         },
       ],
       port: 443,
+      authentication: ["user:mihomo-login"],
+      "ss-config": "aes-256-gcm:mihomo-inline@:8388",
+      "vmess-config": "mihomo-vmess-inline",
+      headers: { Authorization: "Bearer mihomo-header" },
+      "auth-str": "mihomo-auth",
     }),
   );
-  for (const secret of ["uuid-secret", "password-secret", "id-secret", "pem-secret", "key-secret"])
+  for (const secret of [
+    "uuid-secret",
+    "password-secret",
+    "id-secret",
+    "pem-secret",
+    "key-secret",
+    "mihomo-login",
+    "mihomo-inline",
+    "mihomo-vmess-inline",
+    "mihomo-header",
+    "mihomo-auth",
+  ])
     assert(!result.includes(secret));
   assert(result.includes("443"));
 });

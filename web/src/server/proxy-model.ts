@@ -178,7 +178,7 @@ export function redact(value: unknown): unknown {
     return Object.fromEntries(
       Object.entries(value).map(([k, v]) => [
         k,
-        /password|private.?key|secret|token|credential|uuid|short.?ids?|^id$|^key$|^seed$|mldsa65seed/i.test(
+        /password|private.?key|secret|token|credential|uuid|short.?ids?|^id$|^key$|^seed$|mldsa65seed|authentication|authorization|^auth(?:-str)?$|^(?:ss|vmess)-config$/i.test(
           k,
         )
           ? "••••••••"

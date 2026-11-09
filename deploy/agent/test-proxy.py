@@ -34,6 +34,66 @@ def fixture():
 
 
 class ProxyTests(unittest.TestCase):
+    def test_mihomo_paths_yaml_summary_and_active_process(self):
+        self.assertEqual(m.config_files(['mihomo', '-d', 'configs'], '/srv'), [Path('/srv/configs/config.yaml')])
+        self.assertEqual(m.config_files(['clash-meta', '-d=/etc/mihomo', '-f=custom.yml'], '/srv'), [Path('/srv/custom.yml')])
+        self.assertEqual(m.config_files(['mihomo'], '/', {'CLASH_CONFIG_FILE': '/srv/env.yaml'}), [Path('/srv/env.yaml')])
+        self.assertEqual(m.config_files(['mihomo'], '/', {'HOME': '/home/proxy'}), [Path('/home/proxy/.config/mihomo/config.yaml')])
+        self.assertEqual(m.config_files(['mihomo', '-config', 'base64-data']), [])
+        self.assertEqual(m.config_files(['mihomo', '-f', '-']), [])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / 'config.yaml'
+            config.write_text('''mode: rule
+mixed-port: 7890
+allow-lan: false
+secret: controller-secret
+defaults: &ss
+  type: shadowsocks
+  cipher: aes-256-gcm
+  password: inbound-secret
+listeners:
+  - <<: *ss
+    name: ss-in
+    port: 17501
+    listen: 0.0.0.0
+    udp: true
+proxies:
+  - {name: remote, type: ss, server: remote.test, password: outbound-secret}
+proxy-groups:
+  - {name: auto, type: select, proxies: [remote]}
+rules: [MATCH,DIRECT]
+''')
+            item = m.discovery('mihomo', 'test', [config])
+            summary = item['summary']
+            self.assertEqual([i['protocol'] for i in summary['inbounds']], ['shadowsocks', 'mixed'])
+            self.assertEqual(summary['proxyCount'], 1)
+            self.assertEqual(summary['proxyGroupCount'], 1)
+            self.assertNotIn('secret', json.dumps(summary))
+            self.assertEqual(item['configuration']['effective']['listeners'][0]['password'], 'inbound-secret')
+            proc = root / 'proc' / '123'; proc.mkdir(parents=True)
+            (proc / 'exe').symlink_to('/usr/bin/mihomo')
+            (proc / 'cwd').symlink_to(root)
+            (proc / 'cmdline').write_bytes(b'mihomo\0-f\0config.yaml\0')
+            (proc / 'environ').write_bytes(b'HOME=/root\0')
+            with patch.object(m, 'PROC', proc.parent), patch.object(m, 'OPENRC', True), patch.object(m, 'status', return_value={}), patch.object(m.glob, 'glob', return_value=[]):
+                scanned = m.scan()
+            self.assertEqual(len(scanned['discoveries']), 1)
+            self.assertTrue(scanned['discoveries'][0]['summary']['active'])
+            self.assertEqual(scanned['discoveries'][0]['summary']['paths'], [str(config)])
+
+    def test_mihomo_yaml_is_bounded_and_never_constructs_objects(self):
+        for text in ['x: !!python/object/apply:os.system [echo injected]', 'x: &x [*x]', 'x: ' + '[' * 40 + '0' + ']' * 40, '[one, two]', 'x: .nan']:
+            with self.subTest(text=text[:30]), self.assertRaises(ValueError):
+                m.yaml_config(text)
+        config = m.yaml_config('name: OFF\ncreated: 2026-11-09\nudp: true\n')
+        self.assertEqual(config, {'name': 'OFF', 'created': '2026-11-09', 'udp': True})
+        with self.assertRaises(ValueError):
+            m.yaml_config('a: &a {<<: *a}')
+        bomb = 'a0: &a0 {x: 1}\n' + ''.join(f'a{i}: &a{i} {{<<: [*a{i-1}, *a{i-1}]}}\n' for i in range(1, 17))
+        with self.assertRaises(ValueError):
+            m.yaml_config(bomb)
+
     def test_execution_failures_are_distinct_and_do_not_expose_arguments(self):
         args = ['/private/xray-test', '--secret', 'must-not-be-exposed']
         for error, message in [

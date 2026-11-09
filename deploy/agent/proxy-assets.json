@@ -7,7 +7,11 @@
   "sing-box": {
     "version": "1.14.4",
     "amd64": {"url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz","file":"sing-box-1.14.4-amd64.tar.gz","sha256":"699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968","member":"sing-box-1.14.4-linux-amd64/sing-box"},
-    "arm64": {"url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-arm64.tar.gz","file":"sing-box-1.14.4-arm64.tar.gz","sha256":"436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26","member":"sing-box-1.14.4-linux-arm64/sing-box"}
+    "arm64": {"url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-arm64.tar.gz","file":"sing-box-1.14.4-arm64.tar.gz","sha256":"436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26","member":"sing-box-1.14.4-linux-arm64/sing-box"},
+    "musl": {
+      "amd64": {"url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64-musl.tar.gz","file":"sing-box-1.14.4-amd64-musl.tar.gz","sha256":"8f7c5f0651238850d96a0e488e5473cd77ec1a0098f63942e943f475a12057ca","member":"sing-box-1.14.4-linux-amd64-musl/sing-box"},
+      "arm64": {"url":"https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-arm64-musl.tar.gz","file":"sing-box-1.14.4-arm64-musl.tar.gz","sha256":"b95e25f921dc5e17a4cf13327243d1177642c7e35425bf5372862c477c359f56","member":"sing-box-1.14.4-linux-arm64-musl/sing-box"}
+    }
   },
   "caddy": {
     "version": "2.11.9",

@@ -18,9 +18,10 @@ COPY deploy/agent/blink-agent.service /package/blink-agent.service
 COPY deploy/agent/root-terminal.conf.example deploy/agent/enable-root-terminal.sh /package/
 COPY deploy/agent/update-agent.py deploy/agent/enable-auto-update.sh deploy/agent/blink-agent-update.service deploy/agent/blink-agent-update.timer /package/
 COPY deploy/agent/proxy-manager.py deploy/agent/proxy-assets.json deploy/agent/enable-proxy.sh deploy/agent/blink-proxy-manager.service /package/
+COPY deploy/agent/service-platform.sh deploy/agent/blink-agent.openrc deploy/agent/blink-proxy-manager.openrc deploy/agent/blink-agent-update.cron /package/
 COPY deploy/agent/bootstrap.sh /install.sh.in
 RUN mkdir -p /out && cp /blink-agent /package/blink-agent \
-    && tar -czf /out/blink-agent-linux-${TARGETARCH}.tar.gz -C /package blink-agent blink-agent.service root-terminal.conf.example enable-root-terminal.sh update-agent.py enable-auto-update.sh blink-agent-update.service blink-agent-update.timer proxy-manager.py proxy-assets.json enable-proxy.sh blink-proxy-manager.service \
+    && (cd /package && tar -czf /out/blink-agent-linux-${TARGETARCH}.tar.gz *) \
     && version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1) \
     && sed "s/@VERSION@/${version}/g" /install.sh.in > /out/install.sh
 WORKDIR /out

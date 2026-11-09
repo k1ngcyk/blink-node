@@ -74,8 +74,8 @@ export function EnrollmentView({ value }: { value: Enrollment }) {
       </Button>
       <ErrorBanner error={error} />
       <p className="muted text-xs">
-        支持 systemd Linux x86_64 / ARM64，需要 curl、CA 证书和 Python 3.9+。Agent
-        未启用终端时以低权限运行，启用后以 root 运行，每 15
+        支持 systemd Linux 和 Alpine / OpenRC（x86_64 / ARM64）；Alpine 自动安装依赖，其他系统需要
+        curl、CA 证书和 Python 3.9+。Agent 未启用终端时以低权限运行，启用后以 root 运行，每 15
         分钟检查自动更新。命令含一次性凭证，请勿分享；已安装的节点请按部署文档启用自动更新。
       </p>
       <Link href={`/servers/${value.id}`}>

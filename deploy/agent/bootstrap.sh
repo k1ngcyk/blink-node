@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Downloaded over HTTPS from the Master. Enrollment token is read from stdin,
-# never from command-line arguments or a URL. Run as root on systemd Linux.
+# never from command-line arguments or a URL. Run as root on systemd / OpenRC Linux.
 set +x
 set -euo pipefail
 umask 077
@@ -32,17 +32,26 @@ case "$(uname -m)" in
   aarch64|arm64) arch=arm64 ;;
   *) die 'Supported architectures: x86_64 and ARM64.' ;;
 esac
-for tool in curl sha256sum tar systemctl useradd install chown mktemp; do
-  command -v "$tool" >/dev/null || die "Missing dependency: $tool (install curl, ca-certificates and systemd)."
+if [[ -f /etc/alpine-release ]]; then
+  apk add --no-cache bash curl ca-certificates python3 py3-yaml coreutils tar iproute2 openssl busybox-openrc </dev/null
+fi
+for tool in curl sha256sum tar install chown mktemp; do
+  command -v "$tool" >/dev/null || die "Missing dependency: $tool."
 done
-systemctl show-environment >/dev/null 2>&1 || die 'systemd must be running as the service manager.'
+if [[ -x /sbin/openrc-run && ! -d /run/systemd/system ]]; then
+  init=openrc
+  [[ -f /run/openrc/softlevel ]] || die 'OpenRC must be running as the service manager.'
+else
+  init=systemd
+  systemctl show-environment >/dev/null 2>&1 || die 'systemd or OpenRC must be running as the service manager.'
+fi
 command -v python3 >/dev/null || die 'Install python3 (3.9+) for proxy management and automatic updates.'
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die 'Python 3.9+ is required.'
 # Never silently replace an existing installation, identity, or local policy.
-for path in /etc/blink-agent /var/lib/blink-agent /usr/local/bin/blink-agent /etc/systemd/system/blink-agent.service /etc/systemd/system/blink-agent.service.d; do
+for path in /etc/blink-agent /var/lib/blink-agent /usr/local/bin/blink-agent /etc/systemd/system/blink-agent.service /etc/systemd/system/blink-agent.service.d /etc/init.d/blink-agent /etc/conf.d/blink-agent; do
   [[ ! -e "$path" && ! -L "$path" ]] || die "Existing $path found; see README for upgrade / re-enrollment."
 done
-for path in /usr/local/libexec/blink-agent-update /etc/systemd/system/blink-agent-update.service /etc/systemd/system/blink-agent-update.timer /var/lib/blink-agent-update; do
+for path in /usr/local/libexec/blink-agent-update /etc/systemd/system/blink-agent-update.service /etc/systemd/system/blink-agent-update.timer /var/lib/blink-agent-update /etc/periodic/15min/blink-agent-update; do
   [[ ! -e "$path" && ! -L "$path" ]] || die "Existing $path found; see README for upgrades."
 done
 if id blink-agent >/dev/null 2>&1; then
@@ -59,7 +68,7 @@ cleanup() {
   if [[ "$result" != 0 && "$created" == true ]]; then
     # Keep the registered identity for recovery; never consume a token then
     # erase the credential on a later service-start failure.
-    printf 'Installation incomplete. Inspect /etc/blink-agent and journalctl -u blink-agent.\n' >&2
+    printf 'Installation incomplete. Inspect /etc/blink-agent and service logs (journalctl or /var/log/blink-agent/current.log).\n' >&2
   fi
   exit "$result"
 }
@@ -83,14 +92,16 @@ expected=$(awk -v name="$archive" '$2 == name && length($1) == 64 { print $1 }' 
 printf '%s  %s\n' "$expected" "$work/$archive" | sha256sum -c - >/dev/null || die 'Release checksum mismatch.'
 # Extract only expected files; never extract arbitrary archive paths.
 mkdir "$work/package"
-files=(blink-agent blink-agent.service root-terminal.conf.example update-agent.py enable-auto-update.sh blink-agent-update.service blink-agent-update.timer proxy-manager.py proxy-assets.json enable-proxy.sh blink-proxy-manager.service)
+files=(blink-agent blink-agent.service blink-agent.openrc service-platform.sh root-terminal.conf.example update-agent.py enable-auto-update.sh blink-agent-update.service blink-agent-update.timer blink-agent-update.cron proxy-manager.py proxy-assets.json enable-proxy.sh blink-proxy-manager.service blink-proxy-manager.openrc)
 tar -xzf "$work/$archive" -C "$work/package" --no-same-owner --no-same-permissions "${files[@]}"
 for item in "${files[@]}"; do
   [[ -f "$work/package/$item" && ! -L "$work/package/$item" ]] || die 'Invalid release archive.'
 done
 chmod 0755 "$work/package/blink-agent"
 [[ $("$work/package/blink-agent" --version) == "blink-agent $VERSION" ]] || die 'Release version mismatch.'
-id blink-agent >/dev/null 2>&1 || useradd --system --home-dir /var/lib/blink-agent --shell /bin/sh --user-group blink-agent
+source "$work/package/service-platform.sh"
+blink_platform
+blink_user blink-agent /var/lib/blink-agent /bin/sh
 install -d -m 0750 -o root -g blink-agent /etc/blink-agent
 install -d -m 0700 -o blink-agent -g blink-agent /var/lib/blink-agent
 created=true
@@ -105,11 +116,11 @@ allow_insecure_localhost = $local_test
 EOF
 install -m 0640 -o root -g blink-agent "$work/config.toml" /etc/blink-agent/config.toml
 install -m 0755 -o root -g root "$work/package/blink-agent" /usr/local/bin/blink-agent
-install -m 0644 -o root -g root "$work/package/blink-agent.service" /etc/systemd/system/blink-agent.service
+blink_service_install blink-agent "$work/package"
 if ! /usr/local/bin/blink-agent enroll --token-file "$work/token"; then
   # No active installation preceded this invocation. Roll back local files so
   # a fresh panel token can be used immediately after a network/auth failure.
-  rm -f /etc/blink-agent/config.toml /var/lib/blink-agent/identity.json /usr/local/bin/blink-agent /etc/systemd/system/blink-agent.service
+  rm -f /etc/blink-agent/config.toml /var/lib/blink-agent/identity.json /usr/local/bin/blink-agent /etc/systemd/system/blink-agent.service /etc/init.d/blink-agent
   rmdir /etc/blink-agent /var/lib/blink-agent
   created=false
   die 'Enrollment failed. Generate a fresh command in the panel and retry.'
@@ -118,13 +129,17 @@ chown blink-agent:blink-agent /var/lib/blink-agent/identity.json
 chmod 0600 /var/lib/blink-agent/identity.json
 rm -f "$work/token"
 if [[ "$terminal" == true ]]; then
-  install -d -m 0755 -o root -g root /etc/systemd/system/blink-agent.service.d
-  install -m 0644 -o root -g root "$work/package/root-terminal.conf.example" /etc/systemd/system/blink-agent.service.d/terminal.conf
+  if [[ $init == openrc ]]; then
+    printf 'blink_user=root\n' > /etc/conf.d/blink-agent
+    chmod 0644 /etc/conf.d/blink-agent
+  else
+    install -d -m 0755 -o root -g root /etc/systemd/system/blink-agent.service.d
+    install -m 0644 -o root -g root "$work/package/root-terminal.conf.example" /etc/systemd/system/blink-agent.service.d/terminal.conf
+  fi
 fi
-systemctl daemon-reload
 bash "$work/package/enable-proxy.sh"
-systemctl enable --now blink-agent
-systemctl is-active --quiet blink-agent || die 'Service failed to start.'
+blink_service_enable blink-agent
+blink_service_active blink-agent || die 'Service failed to start.'
 if [[ "$auto_update" == true ]]; then
   bash "$work/package/enable-auto-update.sh"
 fi
