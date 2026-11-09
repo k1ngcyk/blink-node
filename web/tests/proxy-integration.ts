@@ -256,6 +256,134 @@ try {
   await api(`instances/${entrance.id}`, "DELETE");
   for (let i = 0; i < 2; i++) for (const task of await dispatch()) await complete(task);
   assert.equal((await sql`SELECT * FROM proxy_instances WHERE id=${entrance.id}`).length, 0);
+  const importedPassword = randomBytes(32).toString("base64");
+  const externalSnapshot = {
+    discoveries: [
+      {
+        key: "existing-ss.service",
+        summary: { engine: "xray", active: true, managed: false },
+        configuration: {
+          effective: {
+            inbounds: [
+              {
+                protocol: "shadowsocks",
+                port: 17501,
+                settings: {
+                  method: "2022-blake3-aes-256-gcm",
+                  password: importedPassword,
+                  network: "tcp,udp",
+                },
+              },
+            ],
+          },
+        },
+      },
+    ],
+  };
+  await initialProxyScan(stranger);
+  const [externalScan] = await dispatch();
+  await complete(externalScan, externalSnapshot);
+  const [externalImport] = await sql`SELECT id FROM proxy_imports WHERE server_id=${stranger}`;
+  const candidates = await api(`imports/${externalImport.id}/exits`);
+  assert.equal(candidates[0].reason, "");
+  assert(!JSON.stringify(candidates).includes(importedPassword));
+  const importedExit = await api(`imports/${externalImport.id}/exits`, "POST", {
+    candidateKey: candidates[0].key,
+    name: "Existing SS2022",
+  });
+  assert.equal(
+    (
+      await api(`imports/${externalImport.id}/exits`, "POST", {
+        candidateKey: candidates[0].key,
+        name: "Existing SS2022",
+      })
+    ).id,
+    importedExit.id,
+    "import registration is idempotent",
+  );
+  assert.equal(
+    (await dispatch()).length,
+    0,
+    "registering an existing service never schedules an apply",
+  );
+  const [externalStored] =
+    await sql`SELECT encrypted_credentials FROM proxy_external_exits WHERE id=${importedExit.id}`;
+  assert(!externalStored.encrypted_credentials.includes(importedPassword));
+  assert.equal(
+    JSON.parse(decrypt(externalStored.encrypted_credentials)).password,
+    importedPassword,
+  );
+  assert(!JSON.stringify(await api("exits")).includes(importedPassword));
+  const externalInput = {
+    ...input,
+    defaultOutbound: importedExit.id,
+    rules: [{ match: "domain", values: ["chain.example.com"], outbound: importedExit.id }],
+  };
+  await assert.rejects(
+    api("instances", "POST", { ...externalInput, serverId: stranger }),
+    /其他服务器/,
+  );
+  const viaExternal = await api("instances", "POST", externalInput);
+  const externalTasks = await dispatch();
+  assert.equal(externalTasks.length, 1);
+  assert.equal(externalTasks[0].serverId, entry, "existing exit service is never redeployed");
+  const externalPayload = externalTasks[0].payload as {
+    instances: { exits: { id: string; password: string; port: number }[] }[];
+  };
+  assert.equal(externalPayload.instances[0].exits[0].password, importedPassword);
+  assert.equal(externalPayload.instances[0].exits[0].port, 17501);
+  await complete(externalTasks[0]);
+  await assert.rejects(api(`exits/${importedExit.id}`, "DELETE"), /链路引用/);
+  await api(`hosts/${stranger}`, "PATCH", { addresses: ["1.0.0.1"], firewall: "external" });
+  const [externalAddressChange] = await dispatch();
+  assert.equal(
+    externalAddressChange.serverId,
+    entry,
+    "existing exit IP changes reapply its entrances only",
+  );
+  assert.equal(
+    (externalAddressChange.payload as { instances: { exits: { address: string }[] }[] })
+      .instances[0].exits[0].address,
+    "1.0.0.1",
+  );
+  await complete(externalAddressChange);
+  externalSnapshot.discoveries[0].configuration.effective.inbounds[0].settings.password =
+    randomBytes(32).toString("base64");
+  await api(`hosts/${stranger}/scan`, "POST", {});
+  const [changedScan] = await dispatch();
+  await complete(changedScan, externalSnapshot);
+  assert.equal(
+    (await api("exits")).find((exit: { id: string }) => exit.id === importedExit.id).state,
+    "stale",
+  );
+  await assert.rejects(api(`hosts/${entry}/apply`, "POST", {}), /已有服务出口不可用/);
+  await assert.rejects(
+    api(`imports/${externalImport.id}/exits`, "POST", {
+      candidateKey: candidates[0].key,
+      name: "Changed",
+    }),
+    /先移除入口引用/,
+  );
+  await api(`instances/${viaExternal.id}`, "DELETE");
+  for (const task of await dispatch()) await complete(task);
+  await api(`imports/${externalImport.id}/exits`, "POST", {
+    candidateKey: candidates[0].key,
+    name: "Changed",
+  });
+  await api(`hosts/${stranger}/scan`, "POST", {});
+  const [missingScan] = await dispatch();
+  await complete(missingScan, { discoveries: [] });
+  assert.equal(
+    (await api("exits")).find((exit: { id: string }) => exit.id === importedExit.id).state,
+    "stale",
+    "disappeared services become unavailable",
+  );
+  await api(`exits/${importedExit.id}`, "DELETE");
+  assert.equal(
+    (await sql`SELECT * FROM proxy_instances WHERE server_id=${stranger}`).length,
+    0,
+    "existing source remains an unmanaged service",
+  );
   const { ensureDns } = await import("../src/server/cloudflare");
   const nativeFetch = globalThis.fetch;
   const zoneId = "a".repeat(32),

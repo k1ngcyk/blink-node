@@ -33,6 +33,7 @@ remote command field exists. PTY is a separately enabled, owner-authorized capab
 - `proxy.result {taskId,desiredVersion,ok,result}`: matched to the assigned server and running
   job. Scans contain encrypted-at-rest discoveries; apply results contain allowlisted status.
 - `proxy.status {status}`: bounded, credential-free managed service / certificate status, every minute. Optional `checkedAt`, `ufwState` (`active` / `inactive` / `not_installed` / `error`), `ufw` verbose output, and `network {checkedAt, addresses: [{address, source: "interface" | "ip.sb", interface?}]}` describe actual node state. At most one public IPv4 and one public IPv6 are accepted; initial observations populate empty host addresses without overwriting saved values. Address discovery is cached for five minutes and refreshed by explicit scans. Client endpoints use these IPs; TLS/SNI retains the configured certificate domain.
+- Exit references may identify managed SS2022 instances or explicitly registered existing Shadowsocks listeners from encrypted scan snapshots. Imported exits use the same typed `exits` payload, including validated cipher/password (server:user for multi-user SS2022), but never enter local `instances` or schedule source-service deployment. Rescans invalidate changed/missing source configurations; source IP changes redeploy referencing entrances.
 
 ## Master → Agent
 

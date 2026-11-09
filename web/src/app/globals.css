@@ -520,6 +520,7 @@ select {
 }
 .field {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 7px;
 }
@@ -529,7 +530,7 @@ select {
 }
 .form-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
 }
 .form-grid .full {

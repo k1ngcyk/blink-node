@@ -555,6 +555,34 @@ try {
     ufw: "Status: active\nDefault: deny (incoming), allow (outgoing)\n22/tcp ALLOW Anywhere",
   };
   await receiveProxyStatus(enrollment.id, nodeStatus);
+  const existingExitServer = randomUUID(),
+    existingImport = randomUUID();
+  await sql`INSERT INTO servers(id,name,info,last_seen) VALUES(${existingExitServer},'已有出口节点','{"proxy":true}'::jsonb,now())`;
+  await sql`INSERT INTO proxy_hosts(server_id,addresses) VALUES(${existingExitServer},ARRAY['1.1.1.1'])`;
+  const existingSummary = {
+    engine: "xray",
+    unit: "xray.service",
+    active: true,
+    managed: false,
+    paths: ["/etc/xray/config.json"],
+    warnings: [],
+    inbounds: [{ protocol: "shadowsocks", port: 17501, reality: false }],
+  };
+  const existingSnapshot = {
+    effective: {
+      inbounds: [
+        {
+          protocol: "shadowsocks",
+          port: 17501,
+          settings: {
+            method: "2022-blake3-aes-256-gcm",
+            password: randomBytes(32).toString("base64"),
+          },
+        },
+      ],
+    },
+  };
+  await sql`INSERT INTO proxy_imports(id,server_id,source_key,summary,encrypted_snapshot) VALUES(${existingImport},${existingExitServer},'xray.service',${sql.json(existingSummary)},${encrypt(JSON.stringify(existingSnapshot))})`;
   await page.goto(`${origin}/proxies`);
   await page.getByRole("combobox", { name: "代理服务器" }).selectOption(enrollment.id);
   await waitFor(
@@ -588,11 +616,48 @@ try {
     () => ok<{ addresses: string[] }>(`proxy/hosts/${enrollment.id}`),
     (h) => h.addresses[0] === "8.8.8.8",
   );
+  await page.getByRole("combobox", { name: "代理服务器" }).selectOption(existingExitServer);
+  await page.getByRole("button", { name: "添加为出口", exact: true }).click();
+  await page.getByLabel("出口名称", { exact: true }).fill("浏览器已有 SS2022 出口");
+  await waitFor(
+    () => page.getByLabel("已有代理服务", { exact: true }).inputValue(),
+    (value) => value === "0:-1",
+  );
+  async function assertDialogFits() {
+    assert(
+      await page.getByRole("dialog").evaluate((dialog) => {
+        const bounds = dialog.getBoundingClientRect();
+        return (
+          bounds.left >= 0 &&
+          bounds.right <= window.innerWidth &&
+          dialog.scrollWidth <= dialog.clientWidth
+        );
+      }),
+      "mobile dialog and its content fit within the viewport",
+    );
+  }
+  await assertDialogFits();
+  await page.screenshot({ path: resolve(dir, "import-exit-mobile.png") });
+  const addedExit = page.waitForResponse(
+    (response) =>
+      response.url().endsWith(`/api/proxy/imports/${existingImport}/exits`) &&
+      response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "确认添加出口", exact: true }).click();
+  const importedExitResponse = await addedExit;
+  assert(importedExitResponse.ok());
+  const importedExitId = (await importedExitResponse.json()).id;
+  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  await page.getByText("浏览器已有 SS2022 出口", { exact: true }).waitFor();
+  await page.getByRole("combobox", { name: "代理服务器" }).selectOption(enrollment.id);
   await page.getByRole("button", { name: "安装代理", exact: true }).click();
   await page.getByRole("dialog").waitFor();
   assert.equal(await page.getByLabel("监听端口", { exact: true }).inputValue(), "443");
+  await page.getByLabel("默认出口", { exact: true }).selectOption(importedExitId);
   await page.getByRole("button", { name: "添加规则", exact: true }).click();
   await page.getByLabel("规则 1 匹配值").fill("example.com");
+  await page.getByLabel("规则 1 出口", { exact: true }).selectOption(importedExitId);
+  await assertDialogFits();
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
   await page.screenshot({ path: resolve(dir, "proxy-dialog-mobile.png") });
   await page.getByLabel("协议", { exact: true }).selectOption("shadowsocks2022");

@@ -17,6 +17,7 @@ import {
 } from "./proxy-model";
 import { validateTarget } from "./network";
 import { proxyResult, proxyStatus } from "./proxy-model";
+import { importedExitCandidates } from "./proxy-imports";
 
 type DB = typeof sql | TransactionSql;
 type User = Awaited<ReturnType<typeof owner>>;
@@ -25,6 +26,19 @@ type Instance = {
   server_id: string;
   spec: ProxySpec;
   encrypted_credentials: string;
+  state: string;
+};
+type ExternalExit = {
+  id: string;
+  server_id: string;
+  import_id: string;
+  candidate_key: string;
+  name: string;
+  port: number;
+  method: string;
+  udp: boolean;
+  encrypted_credentials: string;
+  fingerprint: string;
   state: string;
 };
 const uuid = z.uuid();
@@ -52,6 +66,9 @@ async function idle(tx: DB, ids: string[]) {
 }
 async function payload(tx: DB, serverId: string) {
   const all = await tx<Instance[]>`SELECT * FROM proxy_instances WHERE state<>'deleting'`;
+  const external = await tx<
+    ExternalExit[]
+  >`SELECT e.* FROM proxy_external_exits e JOIN servers s ON s.id=e.server_id WHERE NOT s.revoked`;
   const hosts = await tx`SELECT * FROM proxy_hosts`;
   const [settings] = await tx`SELECT acme_email FROM proxy_settings WHERE id=1`;
   const host = hosts.find((h) => h.server_id === serverId);
@@ -70,6 +87,19 @@ async function payload(tx: DB, serverId: string) {
       ),
     ],
     exits: referencedExits(i.spec).map((id) => {
+      const imported = external.find((exit) => exit.id === id);
+      if (imported) {
+        const address = hosts.find((h) => h.server_id === imported.server_id)?.addresses[0];
+        if (imported.state !== "active" || !address || imported.server_id === serverId)
+          throw new HttpError(409, "已有服务出口不可用，请检查节点地址并刷新扫描");
+        return {
+          id,
+          address,
+          port: imported.port,
+          udp: imported.udp,
+          ...JSON.parse(decrypt(imported.encrypted_credentials)),
+        };
+      }
       const exit = all.find(
         (other) => other.id === id && other.spec.kind === "shadowsocks2022" && other.spec.enabled,
       );
@@ -171,6 +201,38 @@ export async function proxyApi(
     return json(
       await sql`SELECT p.id,p.server_id,p.name,p.kind,p.spec,p.state,p.error,p.updated_at,s.name AS server_name FROM proxy_instances p JOIN servers s ON s.id=p.server_id ORDER BY p.created_at`,
     );
+  if (path[1] === "exits" && path.length === 2 && method === "GET") {
+    const managed =
+      await sql`SELECT p.id,p.server_id,p.name,p.state,s.name AS server_name,p.spec->>'port' AS port,h.addresses FROM proxy_instances p JOIN servers s ON s.id=p.server_id LEFT JOIN proxy_hosts h ON h.server_id=s.id WHERE p.kind='shadowsocks2022' AND p.spec->>'enabled'='true' AND p.state<>'deleting' AND NOT s.revoked ORDER BY p.created_at`;
+    const imported =
+      await sql`SELECT e.id,e.server_id,e.name,e.state,e.port,e.method,s.name AS server_name,h.addresses FROM proxy_external_exits e JOIN servers s ON s.id=e.server_id LEFT JOIN proxy_hosts h ON h.server_id=s.id WHERE NOT s.revoked ORDER BY e.created_at`;
+    return json([
+      ...managed.map((item) => ({
+        ...item,
+        port: Number(item.port),
+        source: "managed",
+        method: "2022-blake3-aes-256-gcm",
+        state: item.addresses?.length ? item.state : "missing_address",
+      })),
+      ...imported.map((item) => ({
+        ...item,
+        source: "imported",
+        state: item.addresses?.length ? item.state : "missing_address",
+      })),
+    ]);
+  }
+  if (path[1] === "exits" && path[2] && method === "DELETE") {
+    const id = uuid.parse(path[2]);
+    await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(741829005)`;
+      const all = await tx<Instance[]>`SELECT * FROM proxy_instances`;
+      if (all.some((item) => referencedExits(item.spec).includes(id)))
+        throw new HttpError(409, "出口正在被链路引用，请先调整入口规则");
+      await tx`DELETE FROM proxy_external_exits WHERE id=${id}`;
+    });
+    await audit(user.id, "proxy.exit.removed", id);
+    return json({ ok: true });
+  }
   if (path[1] === "hosts" && path[2]) {
     const id = uuid.parse(path[2]);
     if (method === "GET") {
@@ -207,7 +269,13 @@ export async function proxyApi(
         >`SELECT * FROM proxy_instances WHERE state<>'deleting'`;
         // Endpoint changes require reapplying all linked entrances; this operation
         // queues them with dependencies instead of leaving stale outbound addresses.
-        const own = instances.filter((i) => i.server_id === id).map((i) => i.id);
+        const external = await tx<
+          ExternalExit[]
+        >`SELECT * FROM proxy_external_exits WHERE server_id=${id}`;
+        const own = [
+          ...instances.filter((i) => i.server_id === id).map((i) => i.id),
+          ...external.map((i) => i.id),
+        ];
         const localExitIds = instances
           .filter((i) => i.server_id === id)
           .flatMap((i) => referencedExits(i.spec));
@@ -228,9 +296,11 @@ export async function proxyApi(
         for (const i of local)
           if (i.spec.domain && i.spec.manageDns)
             await ensureDns(id, i.spec.domain, input.addresses);
+        const downstreamDependencies: string[] = [];
+        let exitServers: string[] = [];
         if (local.length) {
           const dependencies: string[] = [];
-          const exitServers = [
+          exitServers = [
             ...new Set(
               instances.filter((i) => localExitIds.includes(i.id)).map((i) => i.server_id),
             ),
@@ -240,10 +310,11 @@ export async function proxyApi(
             dependencies.push(await enqueue(tx, server, user.id, "apply"));
           }
           const job = await enqueue(tx, id, user.id, "apply", dependencies);
-          for (const server of affected.filter((v) => !exitServers.includes(v))) {
-            await available(tx, server);
-            await enqueue(tx, server, user.id, "apply", [job]);
-          }
+          downstreamDependencies.push(job);
+        }
+        for (const server of affected.filter((v) => !exitServers.includes(v))) {
+          await available(tx, server);
+          await enqueue(tx, server, user.id, "apply", downstreamDependencies);
         }
       });
       await audit(user.id, "proxy.host.updated", id);
@@ -299,6 +370,9 @@ export async function proxyApi(
     await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(741829005)`;
       const all = await tx<Instance[]>`SELECT * FROM proxy_instances`;
+      const external = await tx<
+        ExternalExit[]
+      >`SELECT e.* FROM proxy_external_exits e JOIN servers s ON s.id=e.server_id WHERE NOT s.revoked`;
       const old = all.find((i) => i.id === id);
       if (path[2] && !old) throw new HttpError(404, "实例不存在");
       if (old && input && (input.serverId !== old.server_id || input.kind !== old.spec.kind))
@@ -317,7 +391,17 @@ export async function proxyApi(
           ...(input ? referencedExits(input) : []),
         ]),
       ];
-      const exits = exitIds.map((exitId) => {
+      const requiredExits = new Set(input?.enabled ? referencedExits(input) : []);
+      const exits = exitIds.flatMap((exitId) => {
+        const imported = external.find((item) => item.id === exitId);
+        if (imported) {
+          if (
+            requiredExits.has(exitId) &&
+            (imported.state !== "active" || imported.server_id === serverId)
+          )
+            throw new HttpError(409, "请选择其他服务器上可用的已有服务出口");
+          return [];
+        }
         const exit = all.find(
           (i) =>
             i.id === exitId &&
@@ -325,9 +409,9 @@ export async function proxyApi(
             i.spec.enabled &&
             i.state !== "deleting",
         );
-        if (!exit || exit.server_id === serverId)
+        if ((!exit || exit.server_id === serverId) && requiredExits.has(exitId))
           throw new HttpError(409, "请选择其他服务器上已部署成功的 SS2022 出口");
-        return exit;
+        return exit && exit.server_id !== serverId ? [exit] : [];
       });
       const affectedExits = [...new Set(exits.map((e) => e.server_id))];
       await idle(tx, [serverId, ...affectedExits]);
@@ -373,6 +457,76 @@ export async function proxyApi(
     });
     await audit(user.id, method === "DELETE" ? "proxy.deleted" : "proxy.configured", id);
     return json({ id }, 202);
+  }
+  if (path[1] === "imports" && path[2] && path[3] === "exits") {
+    const importId = uuid.parse(path[2]);
+    if (method === "GET") {
+      const [item] = await sql`SELECT * FROM proxy_imports WHERE id=${importId}`;
+      if (!item) throw new HttpError(404, "导入记录不存在");
+      const existing =
+        await sql`SELECT id,candidate_key,name,state FROM proxy_external_exits WHERE import_id=${importId}`;
+      return json(
+        importedExitCandidates(
+          item.summary.engine,
+          JSON.parse(decrypt(item.encrypted_snapshot)),
+        ).map((candidate) => ({
+          key: candidate.key,
+          label: candidate.label,
+          port: candidate.port,
+          method: candidate.method,
+          udp: candidate.udp,
+          reason: item.summary.managed
+            ? "面板管理的服务已直接提供出口选项"
+            : !item.summary.active
+              ? "服务未运行，请启动后刷新节点扫描"
+              : candidate.reason,
+          existing: existing.find((exit) => exit.candidate_key === candidate.key) ?? null,
+        })),
+      );
+    }
+    if (method === "POST") {
+      const input = await body(
+        request,
+        z.object({
+          candidateKey: z.string().regex(/^\d+:(?:-1|\d+)$/),
+          name: z.string().trim().min(1).max(100),
+        }),
+      );
+      const id = await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(741829005)`;
+        const [item] = await tx`SELECT * FROM proxy_imports WHERE id=${importId}`;
+        if (!item) throw new HttpError(404, "导入记录不存在");
+        await available(tx, item.server_id);
+        await idle(tx, [item.server_id]);
+        if (item.summary.managed || !item.summary.active)
+          throw new HttpError(409, "请选择扫描到的运行中外部服务");
+        const [host] =
+          await tx`SELECT addresses FROM proxy_hosts WHERE server_id=${item.server_id}`;
+        if (!host?.addresses.length) throw new HttpError(400, "先保存出口节点的公网 IP");
+        const candidate = importedExitCandidates(
+          item.summary.engine,
+          JSON.parse(decrypt(item.encrypted_snapshot)),
+        ).find((c) => c.key === input.candidateKey);
+        if (!candidate || candidate.reason)
+          throw new HttpError(400, candidate?.reason || "扫描配置中没有此出口");
+        const [old] = await tx<
+          ExternalExit[]
+        >`SELECT * FROM proxy_external_exits WHERE import_id=${importId} AND candidate_key=${candidate.key}`;
+        if (old && old.fingerprint !== candidate.fingerprint) {
+          const instances = await tx<Instance[]>`SELECT * FROM proxy_instances`;
+          if (instances.some((i) => referencedExits(i.spec).includes(old.id)))
+            throw new HttpError(409, "出口配置已变化，请先移除入口引用再重新添加");
+        }
+        const secret = encrypt(
+          JSON.stringify({ method: candidate.method, password: candidate.password }),
+        );
+        const [exit] =
+          await tx`INSERT INTO proxy_external_exits(server_id,import_id,candidate_key,name,port,method,udp,encrypted_credentials,fingerprint) VALUES(${item.server_id},${importId},${candidate.key},${input.name},${candidate.port},${candidate.method},${candidate.udp},${secret},${candidate.fingerprint}) ON CONFLICT(import_id,candidate_key) DO UPDATE SET name=excluded.name,port=excluded.port,method=excluded.method,udp=excluded.udp,encrypted_credentials=excluded.encrypted_credentials,fingerprint=excluded.fingerprint,state='active' RETURNING id`;
+        return exit.id;
+      });
+      await audit(user.id, "proxy.exit.imported", id);
+      return json({ id });
+    }
   }
   if (path[1] === "imports" && path[2] && method === "GET") {
     const [item] =
@@ -429,8 +583,28 @@ export async function receiveProxyResult(serverId: string, message: z.infer<type
         .parse(message.result.discoveries ?? []);
       await saveProxyStatus(tx, serverId, message.result.status ?? {});
       await tx`UPDATE proxy_hosts SET scanned_at=now(),encrypted_scan=${encrypt(serialized)} WHERE server_id=${serverId}`;
+      await tx`UPDATE proxy_imports SET summary=jsonb_set(summary,'{active}','false'::jsonb) WHERE server_id=${serverId}`;
       for (const item of discoveries)
         await tx`INSERT INTO proxy_imports(server_id,source_key,summary,encrypted_snapshot) VALUES(${serverId},${item.key},${tx.json(item.summary as never)},${encrypt(JSON.stringify(item.configuration))}) ON CONFLICT(server_id,source_key) DO UPDATE SET summary=excluded.summary,encrypted_snapshot=excluded.encrypted_snapshot,updated_at=now()`;
+      const exits = await tx<
+        ExternalExit[]
+      >`SELECT * FROM proxy_external_exits WHERE server_id=${serverId}`;
+      const imports = await tx`SELECT * FROM proxy_imports WHERE server_id=${serverId}`;
+      for (const exit of exits) {
+        const item = imports.find((item) => item.id === exit.import_id);
+        const candidate =
+          item?.summary.active && !item.summary.managed
+            ? importedExitCandidates(
+                item.summary.engine,
+                JSON.parse(decrypt(item.encrypted_snapshot)),
+              ).find((c) => c.key === exit.candidate_key)
+            : undefined;
+        const state =
+          candidate && !candidate.reason && candidate.fingerprint === exit.fingerprint
+            ? "active"
+            : "stale";
+        await tx`UPDATE proxy_external_exits SET state=${state} WHERE id=${exit.id}`;
+      }
     }
     if (job.operation === "apply") {
       if (message.ok) {

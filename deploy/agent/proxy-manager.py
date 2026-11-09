@@ -216,9 +216,14 @@ def validate_payload(data):
         for exit in item['exits']:
             uuid.UUID(exit['id'])
             require(public_ip(exit['address']) and type(exit['port']) is int and 1 <= exit['port'] <= 65535, '出口地址无效')
-            require(exit['method'] == '2022-blake3-aes-256-gcm', '出口加密方法无效')
+            require(exit['method'] in ('2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305', 'aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305'), '出口加密方法无效')
             import base64
-            require(len(base64.b64decode(exit['password'], validate=True)) == 32, '出口密钥无效')
+            require(isinstance(exit['password'], str) and 0 < len(exit['password']) <= 1024, '出口密钥无效')
+            if exit['method'].startswith('2022-'):
+                keys = exit['password'].split(':')
+                size = 16 if exit['method'] == '2022-blake3-aes-128-gcm' else 32
+                require(1 <= len(keys) <= 2 and all(len(base64.b64decode(key, validate=True)) == size for key in keys), '出口密钥无效')
+                require(len(keys) == 1 or exit['method'] != '2022-blake3-chacha20-poly1305', '出口多用户加密方法无效')
             exit_ids.add(exit['id'])
         require(item['defaultOutbound'] in exit_ids, '默认出口不存在')
         for rule in item['rules']:

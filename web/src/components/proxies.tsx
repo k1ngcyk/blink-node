@@ -36,6 +36,17 @@ type Imported = {
     inbounds: { protocol: string; port: number; reality: boolean }[];
   };
 };
+type Exit = {
+  id: string;
+  server_id: string;
+  server_name: string;
+  name: string;
+  port: number;
+  method: string;
+  source: "managed" | "imported";
+  state: string;
+  addresses: string[];
+};
 type Host = {
   addresses: string[];
   firewall: string;
@@ -66,6 +77,8 @@ const states: Record<string, string> = {
   queued: "等待节点",
   running: "执行中",
   done: "完成",
+  stale: "配置已变化，请重新扫描并添加",
+  missing_address: "待配置公网 IP",
 };
 const ufwStates: Record<string, string> = {
   active: "已启用",
@@ -76,12 +89,14 @@ const ufwStates: Record<string, string> = {
 
 export function Proxies({ serverId }: { serverId?: string }) {
   const servers = useResource<Server[]>("servers", 10000),
-    instances = useResource<Instance[]>("proxy/instances", 5000);
+    instances = useResource<Instance[]>("proxy/instances", 5000),
+    exits = useResource<Exit[]>("proxy/exits", 5000);
   const [selected, setSelected] = useState(""),
     [editing, setEditing] = useState<Instance | "new" | null>(null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [detail, setDetail] = useState<{ title: string; value: unknown } | null>(null),
+    [importing, setImporting] = useState<Imported | null>(null),
     [hostDraft, setHostDraft] = useState<{
       id: string;
       addresses: string;
@@ -113,6 +128,7 @@ export function Proxies({ serverId }: { serverId?: string }) {
       await action();
       void host.refresh();
       void instances.refresh();
+      void exits.refresh();
     } catch (error) {
       setError((error as Error).message);
     } finally {
@@ -132,7 +148,7 @@ export function Proxies({ serverId }: { serverId?: string }) {
           </Link>
         </div>
       )}
-      <ErrorBanner error={error || instances.error || host.error || servers.error} />
+      <ErrorBanner error={error || instances.error || exits.error || host.error || servers.error} />
       <div className="row between mb-4">
         {!serverId && (
           <select
@@ -352,8 +368,8 @@ export function Proxies({ serverId }: { serverId?: string }) {
                     <td>
                       {item.spec.defaultOutbound === "direct"
                         ? "直接出网"
-                        : (instances.data?.find((i) => i.id === item.spec.defaultOutbound)?.name ??
-                          "SS2022")}
+                        : (exits.data?.find((i) => i.id === item.spec.defaultOutbound)?.name ??
+                          "出口不可用")}
                       <span className="subline">{item.spec.rules.length} 条分流规则</span>
                     </td>
                     <td>
@@ -435,10 +451,54 @@ export function Proxies({ serverId }: { serverId?: string }) {
         </div>
         {!local.length && (
           <p className="panel-body muted text-sm">
-            先在落地服务器安装 SS2022，再为入口安装 AnyTLS 或 REALITY，并选择出口。
+            在落地服务器安装 SS2022，或将扫描到的已有服务添加为出口，再为入口选择出站策略。
           </p>
         )}
       </section>
+      {!!exits.data?.some(
+        (item) => item.source === "imported" && item.server_id === selectedId,
+      ) && (
+        <section className="panel section-gap">
+          <div className="panel-header">
+            <h2>已添加的已有服务出口</h2>
+          </div>
+          <ul className="plain-list panel-body">
+            {exits.data
+              .filter((item) => item.source === "imported" && item.server_id === selectedId)
+              .map((item) => (
+                <li className="row between" key={item.id}>
+                  <div>
+                    <strong className="font-medium">{item.name}</strong>
+                    <span className="subline mono">
+                      {item.addresses
+                        ?.map(
+                          (address) =>
+                            `${address.includes(":") ? `[${address}]` : address}:${item.port}`,
+                        )
+                        .join(" / ")}{" "}
+                      · {item.method}
+                    </span>
+                    <span
+                      className={item.state === "active" ? "subline success" : "subline error-text"}
+                    >
+                      {item.state === "active"
+                        ? "可用作其他节点的默认出口或规则出口"
+                        : states[item.state] || item.state}
+                    </span>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => void act(() => api(`proxy/exits/${item.id}`, "DELETE"))}
+                  >
+                    移除出口引用
+                  </Button>
+                </li>
+              ))}
+          </ul>
+        </section>
+      )}
       <section className="panel section-gap">
         <div className="panel-header">
           <h2>已有服务扫描</h2>
@@ -446,8 +506,8 @@ export function Proxies({ serverId }: { serverId?: string }) {
         </div>
         <div className="panel-body">
           <p className="muted text-sm mb-4">
-            读取实际启动配置、多文件来源及关联 Web
-            服务，配置快照加密保存。已发现的外部服务以只读方式导入。
+            读取实际启动配置、多文件来源及关联 Web 服务，配置快照加密保存。兼容的 Shadowsocks /
+            SS2022 服务可添加为出口，复用已有连接参数。
           </p>
           <ul className="plain-list">
             {host.data?.imports.map((item) => (
@@ -469,20 +529,32 @@ export function Proxies({ serverId }: { serverId?: string }) {
                     </span>
                   ))}
                 </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() =>
-                    void act(async () =>
-                      setDetail({
-                        title: `${item.summary.engine} · 已导入配置`,
-                        value: await api(`proxy/imports/${item.id}`),
-                      }),
-                    )
-                  }
-                >
-                  查看配置
-                </Button>
+                <div className="row">
+                  {!item.summary.managed && ["xray", "sing-box"].includes(item.summary.engine) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy || jobsRunning}
+                      onClick={() => setImporting(item)}
+                    >
+                      添加为出口
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      void act(async () =>
+                        setDetail({
+                          title: `${item.summary.engine} · 已导入配置`,
+                          value: await api(`proxy/imports/${item.id}`),
+                        }),
+                      )
+                    }
+                  >
+                    查看配置
+                  </Button>
+                </div>
               </li>
             ))}
           </ul>
@@ -541,19 +613,38 @@ export function Proxies({ serverId }: { serverId?: string }) {
               key={editing === "new" ? selectedId : editing.id}
               serverId={selectedId}
               instance={editing === "new" ? undefined : editing}
-              exits={
-                instances.data?.filter(
-                  (i) =>
-                    i.kind === "shadowsocks2022" &&
-                    i.server_id !== selectedId &&
-                    i.spec.enabled &&
-                    i.state === "active",
-                ) ?? []
-              }
+              exits={exits.data?.filter((i) => i.server_id !== selectedId) ?? []}
               onSaved={() => {
                 setEditing(null);
                 void instances.refresh();
                 void host.refresh();
+              }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={!!importing}
+        onOpenChange={(open) => {
+          if (!open) setImporting(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>将已有代理添加为出口</DialogTitle>
+            <DialogDescription>
+              从加密扫描记录读取连接参数，添加后可在入口的默认出口和分流规则中选择。
+            </DialogDescription>
+          </DialogHeader>
+          {importing && (
+            <ImportedExitForm
+              key={importing.id}
+              imported={importing}
+              serverName={server?.name ?? "已有代理"}
+              hasAddress={!!host.data?.addresses.length}
+              onSaved={() => {
+                setImporting(null);
+                void exits.refresh();
               }}
             />
           )}
@@ -579,6 +670,91 @@ export function Proxies({ serverId }: { serverId?: string }) {
   );
 }
 
+function ImportedExitForm({
+  imported,
+  serverName,
+  hasAddress,
+  onSaved,
+}: {
+  imported: Imported;
+  serverName: string;
+  hasAddress: boolean;
+  onSaved: () => void;
+}) {
+  type Candidate = {
+    key: string;
+    label: string;
+    port: number;
+    method: string;
+    reason: string;
+    existing: { id: string; name: string; state: string } | null;
+  };
+  const candidates = useResource<Candidate[]>(`proxy/imports/${imported.id}/exits`);
+  const [chosen, setChosen] = useState(""),
+    [error, setError] = useState(""),
+    [busy, setBusy] = useState(false);
+  const selected =
+    chosen || candidates.data?.find((item) => !item.reason)?.key || candidates.data?.[0]?.key || "";
+  const candidate = candidates.data?.find((item) => item.key === selected);
+  return (
+    <form
+      className="stack"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        setBusy(true);
+        setError("");
+        const data = new FormData(event.currentTarget);
+        try {
+          await api(`proxy/imports/${imported.id}/exits`, "POST", {
+            candidateKey: selected,
+            name: data.get("name"),
+          });
+          onSaved();
+        } catch (error) {
+          setError((error as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <label className="field">
+        出口名称
+        <Input name="name" required maxLength={100} defaultValue={`${serverName} · 已有代理`} />
+      </label>
+      <label className="field">
+        已有代理服务
+        <select
+          aria-label="已有代理服务"
+          value={selected}
+          onChange={(event) => setChosen(event.target.value)}
+          disabled={busy || !candidates.data?.length}
+        >
+          <option value="" disabled>
+            选择扫描到的服务
+          </option>
+          {candidates.data?.map((item) => (
+            <option key={item.key} value={item.key}>
+              {item.label} · {item.method}
+              {item.existing ? " · 已添加" : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+      {!hasAddress && (
+        <p className="notice text-sm">请先在节点连接设置中保存出口服务器的公网 IP。</p>
+      )}
+      {candidate?.reason && <p className="notice text-sm">{candidate.reason}</p>}
+      {candidates.data && !candidates.data.length && (
+        <p className="notice text-sm">此配置没有可识别的 Shadowsocks / SS2022 入站。</p>
+      )}
+      <ErrorBanner error={error || candidates.error} />
+      <Button type="submit" disabled={busy || !candidate || !!candidate.reason || !hasAddress}>
+        {busy ? "正在添加…" : candidate?.existing ? "更新出口引用" : "确认添加出口"}
+      </Button>
+    </form>
+  );
+}
+
 function ProxyForm({
   serverId,
   instance,
@@ -587,22 +763,29 @@ function ProxyForm({
 }: {
   serverId: string;
   instance?: Instance;
-  exits: Instance[];
+  exits: Exit[];
   onSaved: () => void;
 }) {
   const [kind, setKind] = useState<ProxySpec["kind"]>(instance?.kind || "reality"),
+    [defaultOutbound, setDefaultOutbound] = useState(instance?.spec.defaultOutbound ?? "direct"),
     [rules, setRules] = useState<ProxySpec["rules"]>(instance?.spec.rules ?? []),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
-  function exitOptions() {
+  function exitOptions(selected: string) {
     return (
       <>
         <option value="direct">直接出网</option>
         {exits.map((i) => (
-          <option value={i.id} key={i.id}>
-            {i.name} · {i.server_name}
+          <option value={i.id} key={i.id} disabled={i.state !== "active"}>
+            {i.name} · {i.server_name} · {i.source === "imported" ? "已有服务" : "面板部署"}
+            {i.state !== "active" ? ` · ${states[i.state] || i.state}` : ""}
           </option>
         ))}
+        {selected !== "direct" && !exits.some((item) => item.id === selected) && (
+          <option value={selected} disabled>
+            原出口不可用，请重新选择
+          </option>
+        )}
       </>
     );
   }
@@ -722,8 +905,13 @@ function ProxyForm({
         {kind !== "shadowsocks2022" && (
           <label className="field full">
             默认出口
-            <select name="outbound" defaultValue={instance?.spec.defaultOutbound ?? "direct"}>
-              {exitOptions()}
+            <select
+              name="outbound"
+              aria-label="默认出口"
+              value={defaultOutbound}
+              onChange={(event) => setDefaultOutbound(event.target.value)}
+            >
+              {exitOptions(defaultOutbound)}
             </select>
           </label>
         )}
@@ -795,7 +983,7 @@ function ProxyForm({
                     )
                   }
                 >
-                  {exitOptions()}
+                  {exitOptions(rule.outbound)}
                 </select>
                 <Button
                   type="button"

@@ -123,6 +123,21 @@ class ProxyTests(unittest.TestCase):
         with self.assertRaises(m.DeploymentError):
             m.validate_payload(data)
 
+    def test_imported_ss2022_multi_user_exit_preserves_both_keys(self):
+        item = fixture()
+        password = ':'.join(base64.b64encode(secrets.token_bytes(16)).decode() for _ in range(2))
+        exit = {'id': str(uuid.uuid4()), 'address': '1.1.1.1', 'port': 17501, 'udp': True, 'method': '2022-blake3-aes-128-gcm', 'password': password}
+        item.update(exits=[exit], defaultOutbound=exit['id'])
+        data = {'instances': [item], 'addresses': ['8.8.8.8'], 'firewall': 'external', 'email': 'a@b.test'}
+        m.validate_payload(data)
+        self.assertEqual(m.core_config(item)['outbounds'][1]['settings']['password'], password)
+        item.update(kind='anytls', credentials={'password': base64.b64encode(secrets.token_bytes(32)).decode()})
+        m.validate_payload(data)
+        self.assertEqual(m.core_config(item)['outbounds'][1]['password'], password)
+        exit['password'] = base64.b64encode(secrets.token_bytes(32)).decode()
+        with self.assertRaises(m.DeploymentError):
+            m.validate_payload(data)
+
     def test_route_order_and_final_are_explicit(self):
         item = fixture()
         item['rules'] = [{'match': 'domain', 'values': ['direct.test'], 'outbound': 'direct'}, {'match': 'ip_cidr', 'values': ['1.1.1.0/24'], 'outbound': 'direct'}]
@@ -253,7 +268,7 @@ def integration():
         (work / 'extensions').write_text('subjectAltName=DNS:entry.example.test,DNS:any.example.test,DNS:upstream.example.test\nextendedKeyUsage=serverAuth\n')
         command(['openssl', 'x509', '-req', '-in', str(work / 'server.csr'), '-CA', str(ca), '-CAkey', str(ca_key), '-CAcreateserial', '-out', str(cert), '-days', '1', '-extfile', str(work / 'extensions')])
         with open('/etc/hosts', 'a') as hosts:
-            hosts.write('\n127.0.0.1 entry.example.test any.example.test upstream.example.test direct.test chain.test\n127.0.0.2 ipdirect.test\n')
+            hosts.write('\n127.0.0.1 entry.example.test any.example.test upstream.example.test direct.test chain.test imported.test\n127.0.0.2 ipdirect.test\n')
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(200); self.end_headers(); self.wfile.write(b'blink-proxy-ok')
@@ -290,7 +305,9 @@ def integration():
         public = re.search(r'(?:Password|Public key|PublicKey)[^:\n]*:\s*([A-Za-z0-9_-]{43})', output)[1]
         ss = fixture(); ss.update(kind='shadowsocks2022', port=18388, domain='', credentials={'method': '2022-blake3-aes-256-gcm', 'password': base64.b64encode(secrets.token_bytes(32)).decode()})
         exit = {'id': ss['id'], 'address': '127.0.0.1', 'port': ss['port'], 'udp': True, **ss['credentials']}
-        reality.update(exits=[exit], defaultOutbound=ss['id'], rules=[{'match': 'domain', 'values': ['direct.test'], 'outbound': 'direct'}, {'match': 'ip_cidr', 'values': ['127.0.0.2/32'], 'outbound': 'direct'}])
+        server_key, user_key = (base64.b64encode(secrets.token_bytes(16)).decode() for _ in range(2))
+        imported_exit = {'id': str(uuid.uuid4()), 'address': '127.0.0.1', 'port': 18389, 'udp': True, 'method': '2022-blake3-aes-128-gcm', 'password': server_key + ':' + user_key}
+        reality.update(exits=[exit, imported_exit], defaultOutbound=ss['id'], rules=[{'match': 'domain', 'values': ['imported.test'], 'outbound': imported_exit['id']}, {'match': 'domain', 'values': ['direct.test'], 'outbound': 'direct'}, {'match': 'ip_cidr', 'values': ['127.0.0.2/32'], 'outbound': 'direct'}])
         anytls = copy.deepcopy(reality); anytls.update(id=str(uuid.uuid4()), kind='anytls', port=18444, domain='any.example.test', credentials={'password': base64.b64encode(secrets.token_bytes(32)).decode()})
         data = {'instances': [reality, anytls], 'addresses': ['8.8.8.8'], 'email': 'test@example.test', 'firewall': 'external'}
         web = m.caddy_config(data)
@@ -301,6 +318,7 @@ def integration():
             server['automatic_https'] = {'disable': True}
         launch('caddy', web, 'caddy'); ready(8003)
         ss_process = launch('sing-box', m.core_config(ss), 'ss'); ready(18388)
+        launch('sing-box', {'inbounds': [{'type': 'shadowsocks', 'listen': '127.0.0.1', 'listen_port': 18389, 'method': imported_exit['method'], 'password': server_key, 'users': [{'name': 'existing', 'password': user_key}]}], 'outbounds': [{'type': 'direct'}]}, 'existing-multi-user-ss'); ready(18389)
         reality_config = m.core_config(reality)
         # Xray 26.11 blocks loopback in freedom by default. This exception is
         # limited to the isolated test target; production retains core defaults.
@@ -332,7 +350,7 @@ def integration():
         def get(port, host):
             return subprocess.run(['curl', '-fsS', '--max-time', '15', '--noproxy', '', '--socks5-hostname', '127.0.0.1:' + str(port), 'http://' + host + ':18080/'], capture_output=True, timeout=18)
         for port in (19080, 19081):
-            for host in ('chain.test', 'direct.test', 'ipdirect.test'):
+            for host in ('chain.test', 'direct.test', 'ipdirect.test', 'imported.test'):
                 result = get(port, host)
                 assert result.returncode == 0 and result.stdout == b'blink-proxy-ok', (port, host, result.stderr)
         fallback = subprocess.run(['curl', '-fsS', '--max-time', '10', '--noproxy', '*', '--cacert', str(ca), 'https://entry.example.test/'], capture_output=True)
