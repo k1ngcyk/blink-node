@@ -6,9 +6,30 @@ import { IconX as XIcon } from "@tabler/icons-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
 import { Button } from "@/components/ui/button";
+import { ElevationForm } from "@/components/elevation-form";
+import { useElevation, cancelSurfaceElevation } from "@/lib/elevation";
 
-function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
-  return <DialogPrimitive.Root data-slot="dialog" {...props} />;
+const SurfaceContext = React.createContext("");
+
+function Dialog({ onOpenChange, ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
+  const surface = React.useId();
+  const challenge = useElevation();
+  React.useEffect(() => () => cancelSurfaceElevation(surface), [surface]);
+  React.useEffect(() => {
+    if (props.open === false) cancelSurfaceElevation(surface);
+  }, [props.open, surface]);
+  return (
+    <SurfaceContext.Provider value={surface}>
+      <DialogPrimitive.Root
+        data-slot="dialog"
+        {...props}
+        onOpenChange={(open) => {
+          if (!open && challenge?.surface === surface) cancelSurfaceElevation(surface);
+          else onOpenChange?.(open);
+        }}
+      />
+    </SurfaceContext.Provider>
+  );
 }
 
 function DialogTrigger({ ...props }: React.ComponentProps<typeof DialogPrimitive.Trigger>) {
@@ -43,23 +64,33 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  elevationHost = true,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean;
+  elevationHost?: boolean;
 }) {
+  const surface = React.useContext(SurfaceContext);
+  const challenge = useElevation();
+  const verifying = elevationHost && challenge?.surface === surface;
   return (
     <DialogPortal data-slot="dialog-portal">
       <DialogOverlay />
       <DialogPrimitive.Content
         data-slot="dialog-content"
+        data-elevation-surface={elevationHost ? surface : undefined}
+        data-verifying={verifying || undefined}
         className={cn(
-          "fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] grid-cols-[minmax(0,1fr)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-lg duration-200 outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
+          "fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] max-h-[90dvh] overflow-y-auto grid-cols-[minmax(0,1fr)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-xl border bg-card p-6 shadow-lg outline-none sm:max-w-lg",
           className,
         )}
         {...props}
       >
-        {children}
-        {showCloseButton && (
+        <div className="dialog-body" hidden={verifying}>
+          {children}
+        </div>
+        {verifying && <ElevationForm key={challenge.id} />}
+        {showCloseButton && !verifying && (
           <DialogPrimitive.Close
             data-slot="dialog-close"
             className="absolute top-4 right-4 rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
@@ -100,7 +131,7 @@ function DialogFooter({
       {children}
       {showCloseButton && (
         <DialogPrimitive.Close asChild>
-          <Button variant="outline">Close</Button>
+          <Button variant="outline">关闭</Button>
         </DialogPrimitive.Close>
       )}
     </div>

@@ -9,13 +9,15 @@ import {
   IconShieldCheck,
   IconSettings,
   IconLogout,
-  IconChevronRight,
+  IconMenu2,
   IconNetwork,
   IconRss,
 } from "@tabler/icons-react";
 import { Button } from "./ui/button";
 import { api } from "@/lib/client";
 import { useEffect, useState } from "react";
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "./ui/dialog";
+import { ElevationDialog } from "./elevation-dialog";
 const links = [
   { href: "/", label: "服务器", icon: IconServer },
   { href: "/proxies", label: "代理服务", icon: IconNetwork },
@@ -25,6 +27,30 @@ const links = [
   { href: "/audit", label: "操作审计", icon: IconShieldCheck },
   { href: "/settings", label: "设置", icon: IconSettings },
 ];
+function Navigation({ title, onNavigate }: { title: string; onNavigate?: () => void }) {
+  return (
+    <nav className="nav" aria-label="主导航">
+      {links.map((link, index) => (
+        <div key={link.href}>
+          {[0, 3, 5].includes(index) && (
+            <div className="nav-caption">
+              {index === 0 ? "基础设施" : index === 3 ? "观测与告警" : "工作区"}
+            </div>
+          )}
+          <Link
+            href={link.href}
+            onClick={onNavigate}
+            className={title === link.label ? "active" : ""}
+            aria-current={title === link.label ? "page" : undefined}
+          >
+            <link.icon size={19} stroke={1.7} />
+            {link.label}
+          </Link>
+        </div>
+      ))}
+    </nav>
+  );
+}
 export function Brand() {
   return (
     <div className="brand">
@@ -52,61 +78,52 @@ export function Shell({ children, username }: { children: React.ReactNode; usern
     links.find((l) =>
       l.href === "/" ? path === "/" || path.startsWith("/servers") : path.startsWith(l.href),
     )?.label ?? "控制台";
-  const [error, setError] = useState("");
+  const [error, setError] = useState(""),
+    [menuOpen, setMenuOpen] = useState(false);
+  async function logout() {
+    try {
+      await api("auth/logout", "POST", {});
+      router.replace("/login");
+      router.refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <Link href="/" aria-label="Blink Node 首页">
           <Brand />
         </Link>
-        <div>
-          <div className="nav-caption">管理工作区</div>
-          <nav className="nav">
-            {links.map((l) => (
-              <Link
-                key={l.href}
-                href={l.href}
-                className={title === l.label ? "active" : ""}
-                aria-current={title === l.label ? "page" : undefined}
-              >
-                <l.icon size={19} stroke={1.65} />
-                {l.label}
-              </Link>
-            ))}
-          </nav>
-        </div>
+        <Navigation title={title} />
         <div className="sidebar-bottom">
-          <strong>私有控制平面</strong>只有你能管理服务器
-          <br />
-          <span className="mono">v0.1.0</span>
+          <div className="row between">
+            <div className="row">
+              <span className="account-avatar">{username.slice(0, 1).toUpperCase()}</span>
+              <div>
+                <strong>{username}</strong>
+                <span>所有者 · 私有工作区</span>
+              </div>
+            </div>
+            <Button variant="ghost" size="icon" aria-label="退出登录" onClick={logout}>
+              <IconLogout size={17} />
+            </Button>
+          </div>
         </div>
       </aside>
       <div className="workspace">
         <header className="topbar">
-          <div className="row">
-            <span>工作区</span>
-            <IconChevronRight size={12} />
-            <strong className="text-xs font-medium">{title}</strong>
-          </div>
-          <div className="row">
-            <span>{username} · 所有者</span>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="退出登录"
-              onClick={async () => {
-                try {
-                  await api("auth/logout", "POST", {});
-                  router.replace("/login");
-                  router.refresh();
-                } catch (e) {
-                  setError((e as Error).message);
-                }
-              }}
-            >
-              <IconLogout size={17} />
-            </Button>
-          </div>
+          <Link href="/" aria-label="Blink Node 首页">
+            <Brand />
+          </Link>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="打开导航"
+            onClick={() => setMenuOpen(true)}
+          >
+            <IconMenu2 size={21} />
+          </Button>
         </header>
         <main className="content">
           {error && (
@@ -117,6 +134,18 @@ export function Shell({ children, username }: { children: React.ReactNode; usern
           {children}
         </main>
       </div>
+      <Dialog open={menuOpen} onOpenChange={setMenuOpen}>
+        <DialogContent className="mobile-nav-dialog">
+          <DialogTitle>工作区导航</DialogTitle>
+          <DialogDescription>{username} · 所有者</DialogDescription>
+          <Navigation title={title} onNavigate={() => setMenuOpen(false)} />
+          <Button variant="outline" onClick={logout}>
+            <IconLogout size={16} />
+            退出登录
+          </Button>
+        </DialogContent>
+      </Dialog>
+      <ElevationDialog />
     </div>
   );
 }

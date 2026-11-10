@@ -65,7 +65,7 @@ async function handle(request: Request, context: Context) {
             await tx`UPDATE users SET last_totp_step=${step} WHERE id=${user.id} AND last_totp_step<${step} RETURNING id`
           ).length
         )
-          throw new HttpError(401, "验证码已使用");
+          throw new HttpError(401, "验证码已使用，请等待身份验证器显示下一组验证码");
         await tx`UPDATE sessions SET elevated_until=now()+interval '10 minutes' WHERE token_hash=${user.token_hash}`;
       });
       await audit(user.id, "session.elevated", null);

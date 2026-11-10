@@ -5,6 +5,7 @@ export class HttpError extends Error {
   constructor(
     public status: number,
     message: string,
+    public code?: string,
   ) {
     super(message);
   }
@@ -68,7 +69,11 @@ export function json(value: unknown, status = 200, headers: Record<string, strin
   });
 }
 export function failure(error: unknown) {
-  if (error instanceof HttpError) return json({ error: error.message }, error.status);
+  if (error instanceof HttpError)
+    return json(
+      { error: error.message, ...(error.code ? { code: error.code } : {}) },
+      error.status,
+    );
   if (error instanceof z.ZodError) return json({ error: "参数格式错误" }, 400);
   console.error(
     "Request failed",

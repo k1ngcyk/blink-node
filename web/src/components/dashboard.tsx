@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   IconPlus,
   IconSearch,
@@ -20,17 +20,48 @@ import { Server, serverAddresses, status } from "@/lib/types";
 import { bytes, percent } from "@/lib/utils";
 import { ErrorBanner, Loading, Empty, ServerStatus, Meter } from "./common";
 import { agentInstallCommand, agentVersion } from "@/lib/agent-install";
+import { SystemIdentity } from "./system-identity";
+import { useQueryState } from "@/lib/query-state";
 type Enrollment = { id: string; enrollmentToken: string; serverUrl: string; expiresIn: number };
 export function EnrollmentView({ value }: { value: Enrollment }) {
   const [copied, setCopied] = useState(false),
     [terminal, setTerminal] = useState(false),
     [error, setError] = useState("");
+  const server = useResource<Server>(`servers/${value.id}`, 3000);
+  const [issuedAt] = useState(() => Date.now());
+  const [remaining, setRemaining] = useState(value.expiresIn);
+  useEffect(() => {
+    const timer = setInterval(
+      () => setRemaining(Math.max(0, value.expiresIn - Math.floor((Date.now() - issuedAt) / 1000))),
+      1000,
+    );
+    return () => clearInterval(timer);
+  }, [issuedAt, value.expiresIn]);
+  const connected =
+    !!server.data?.last_seen &&
+    Date.parse(server.data.last_seen) > issuedAt &&
+    status(server.data) === "online";
   const command = agentInstallCommand(value.serverUrl, value.enrollmentToken, terminal);
   return (
     <div className="stack">
-      <div className="notice">
-        接入凭证将在 15 分钟后失效，只能接入这一台服务器。以 root 身份运行下方命令（或先执行 sudo
-        -i），自动完成下载、校验、注册和开机启动。
+      <div className={`enrollment-status ${connected ? "connected" : ""}`} role="status">
+        <IconCheck size={20} />
+        <div>
+          <strong>
+            {connected
+              ? "服务器已连接"
+              : remaining
+                ? "服务器已创建，等待安装 Agent"
+                : "接入凭证已过期"}
+          </strong>
+          <p>
+            {connected
+              ? "监控数据已开始上报，可以查看服务器了。"
+              : remaining
+                ? `在服务器 root Shell 执行安装命令。凭证剩余 ${Math.floor(remaining / 60)} 分 ${remaining % 60} 秒。`
+                : "前往服务器设置重新生成接入凭证。"}
+          </p>
+        </div>
       </div>
       <label className="field">
         Master 地址
@@ -59,6 +90,7 @@ export function EnrollmentView({ value }: { value: Enrollment }) {
       </label>
       <Button
         className="w-full"
+        disabled={connected || !remaining}
         onClick={async () => {
           try {
             await navigator.clipboard.writeText(command);
@@ -78,28 +110,35 @@ export function EnrollmentView({ value }: { value: Enrollment }) {
         curl、CA 证书和 Python 3.9+。Agent 未启用终端时以低权限运行，启用后以 root 运行，每 15
         分钟检查自动更新。命令含一次性凭证，请勿分享；已安装的节点请按部署文档启用自动更新。
       </p>
-      <Link href={`/servers/${value.id}`}>
-        <Button className="w-full">
-          查看服务器
+      <Button asChild variant={connected ? "default" : "outline"} className="w-full">
+        <Link href={`/servers/${value.id}${!remaining && !connected ? "?tab=settings" : ""}`}>
+          {!remaining && !connected ? "前往接入设置" : "查看服务器"}
           <IconChevronRight size={15} />
-        </Button>
-      </Link>
+        </Link>
+      </Button>
     </div>
   );
 }
 export function Dashboard() {
   const { data, loading, error, refresh } = useResource<Server[]>("servers", 5000);
-  const [search, setSearch] = useState(""),
-    [group, setGroup] = useState("all"),
-    [filter, setFilter] = useState("all"),
-    [open, setOpen] = useState(false),
+  const [search, setSearch] = useQueryState("q"),
+    [group, setGroup] = useQueryState("group", "all"),
+    [filter, setFilter] = useQueryState("status", "all");
+  const [open, setOpen] = useState(false),
     [enrollment, setEnrollment] = useState<Enrollment | null>(null),
     [saveError, setSaveError] = useState(""),
     [copiedIp, setCopiedIp] = useState(""),
     [copyError, setCopyError] = useState(""),
     [saving, setSaving] = useState(false);
   const servers = data ?? [],
-    online = servers.filter((s) => status(s) === "online");
+    online = servers.filter((s) => status(s) === "online"),
+    reporting = online.filter((s) => s.latest != null);
+  const listQuery = new URLSearchParams();
+  if (search) listQuery.set("q", search);
+  if (group !== "all") listQuery.set("group", group);
+  if (filter !== "all") listQuery.set("status", filter);
+  const serverHref = (id: string) =>
+    `/servers/${id}${listQuery.size ? `?from=${encodeURIComponent(`/?${listQuery}`)}` : ""}`;
   const groups = [...new Set(servers.map((s) => s.group_name))];
   const filtered = servers.filter(
     (s) =>
@@ -136,8 +175,9 @@ export function Dashboard() {
     <>
       <div className="page-head">
         <div>
+          <div className="eyebrow">INFRASTRUCTURE</div>
           <h1>服务器概览</h1>
-          <p>基础设施的实时状态，一目了然。</p>
+          <p>监控运行状态，连接你的每一台服务器。</p>
         </div>
         <Button
           onClick={() => {
@@ -156,7 +196,7 @@ export function Dashboard() {
         <Loading />
       ) : (
         <>
-          <div className="stats">
+          <div className="stats fleet-stats">
             <div className="stat">
               <div className="stat-label">
                 在线服务器
@@ -177,11 +217,13 @@ export function Dashboard() {
                 <IconCpu size={17} />
               </div>
               <div className="stat-value">
-                {online.length
-                  ? percent(online.reduce((a, s) => a + (s.latest?.cpu ?? 0), 0) / online.length)
+                {reporting.length
+                  ? percent(
+                      reporting.reduce((a, s) => a + (s.latest?.cpu ?? 0), 0) / reporting.length,
+                    )
                   : "—"}
               </div>
-              <div className="stat-note">当前在线服务器的平均值</div>
+              <div className="stat-note">{reporting.length} 台已有采样</div>
             </div>
             <div className="stat">
               <div className="stat-label">
@@ -189,7 +231,11 @@ export function Dashboard() {
                 <IconActivity size={17} />
               </div>
               <div className="stat-value">
-                {bytes(online.reduce((a, s) => a + (s.latest?.rxRate ?? 0), 0))}
+                {bytes(
+                  reporting.length
+                    ? reporting.reduce((a, s) => a + (s.latest?.rxRate ?? 0), 0)
+                    : null,
+                )}
                 <span className="muted text-sm font-normal">/s</span>
               </div>
               <div className="stat-note">全部非回环网卡汇总</div>
@@ -200,19 +246,17 @@ export function Dashboard() {
                 <IconArrowsTransferUp size={17} />
               </div>
               <div className="stat-value">
-                {bytes(online.reduce((a, s) => a + (s.latest?.txRate ?? 0), 0))}
+                {bytes(
+                  reporting.length
+                    ? reporting.reduce((a, s) => a + (s.latest?.txRate ?? 0), 0)
+                    : null,
+                )}
                 <span className="muted text-sm font-normal">/s</span>
               </div>
               <div className="stat-note">5 秒采样 · 自动刷新</div>
             </div>
           </div>
-          <section className="panel">
-            <div className="panel-header">
-              <h2>
-                服务器 <span className="muted font-normal text-xs ml-2">{servers.length}</span>
-              </h2>
-              <span className="status online">实时监控</span>
-            </div>
+          <section className="panel fleet-panel">
             <div className="toolbar">
               <div className="search">
                 <IconSearch size={16} />
@@ -244,6 +288,7 @@ export function Dashboard() {
                 <option value="pending">待接入</option>
                 <option value="revoked">已吊销</option>
               </select>
+              <span className="toolbar-meta">{filtered.length} 台服务器 · 5 秒刷新</span>
             </div>
             {!servers.length ? (
               <Empty
@@ -275,7 +320,7 @@ export function Dashboard() {
               />
             ) : (
               <div className="table-scroll">
-                <table className="data-table">
+                <table className="data-table server-table">
                   <thead>
                     <tr>
                       <th>服务器 / 分组</th>
@@ -291,9 +336,8 @@ export function Dashboard() {
                   <tbody>
                     {filtered.map((s) => (
                       <tr key={s.id}>
-                        <td>
-                          <Link className="server-name" href={`/servers/${s.id}`}>
-                            <IconServer size={16} className="muted" />
+                        <td className="identity-cell">
+                          <Link className="server-name" href={serverHref(s.id)}>
                             {s.name}
                           </Link>
                           <span className="subline">
@@ -301,17 +345,17 @@ export function Dashboard() {
                             {s.tags.length ? ` · ${s.tags.join(" / ")}` : ""}
                           </span>
                         </td>
-                        <td>
+                        <td className="status-cell">
                           <ServerStatus server={s} />
                         </td>
-                        <td>
+                        <td className="address-cell">
                           {serverAddresses(s).length ? (
                             <>
                               {serverAddresses(s).map((address) => (
                                 <button
                                   key={address}
                                   type="button"
-                                  className="row mono text-xs py-1 text-left hover:text-primary"
+                                  className="ip-copy mono"
                                   aria-label={`复制 ${address}`}
                                   title={
                                     copiedIp === `${s.id}:${address}` ? "已复制" : "复制 IP 地址"
@@ -342,13 +386,13 @@ export function Dashboard() {
                             <span className="muted">等待地址上报</span>
                           )}
                         </td>
-                        <td>
+                        <td className="cpu-cell" data-label="CPU">
                           <Meter value={status(s) === "online" ? s.latest?.cpu : null} />
                         </td>
-                        <td>
+                        <td className="memory-cell" data-label="内存">
                           <Meter value={status(s) === "online" ? s.latest?.memory : null} />
                         </td>
-                        <td>
+                        <td className="network-cell" data-label="网络 ↓ / ↑">
                           <div className="mono text-xs">
                             ↓ {bytes(status(s) === "online" ? s.latest?.rxRate : null)}/s
                           </div>
@@ -356,19 +400,18 @@ export function Dashboard() {
                             ↑ {bytes(status(s) === "online" ? s.latest?.txRate : null)}/s
                           </div>
                         </td>
-                        <td>
-                          <span className="block max-w-56 whitespace-normal">
-                            {s.info.os ?? "等待系统信息"}
-                          </span>
-                          <span className="subline">
-                            {s.info.arch ? `${s.info.arch} · ` : ""}
-                            {s.info.cpuCount
-                              ? `${s.info.cpuCount} 核 · ${bytes(s.latest?.memoryTotal)}`
-                              : "等待 Agent 上报"}
-                          </span>
+                        <td className="system-cell">
+                          <SystemIdentity
+                            os={s.info.os}
+                            detail={`${s.info.arch ? `${s.info.arch} · ` : ""}${s.info.cpuCount ? `${s.info.cpuCount} 核 · ${bytes(s.latest?.memoryTotal)}` : "等待 Agent 上报"}`}
+                          />
                         </td>
-                        <td>
-                          <Link href={`/servers/${s.id}`} aria-label={`查看 ${s.name}`}>
+                        <td className="action-cell">
+                          <Link
+                            className="row-action"
+                            href={serverHref(s.id)}
+                            aria-label={`查看 ${s.name}`}
+                          >
                             <IconChevronRight size={17} />
                           </Link>
                         </td>

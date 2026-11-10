@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useReducer, useState } from "react";
+import { ActionCancelled, requestElevation, protectedActionLabel } from "./elevation";
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -9,16 +10,35 @@ export class ApiError extends Error {
   }
 }
 export async function api<T = unknown>(path: string, method = "GET", data?: unknown): Promise<T> {
-  const res = await fetch(`/api/${path}`, {
+  const source = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const surface =
+    source?.closest("[data-elevation-surface]")?.getAttribute("data-elevation-surface") ?? null;
+  const location = window.location.pathname + window.location.search;
+  const options: RequestInit = {
     method,
     credentials: "same-origin",
     cache: "no-store",
     headers: data !== undefined ? { "Content-Type": "application/json" } : undefined,
     body: data !== undefined ? JSON.stringify(data) : undefined,
-  });
-  const value = await res.json();
+  };
+  let res = await fetch(`/api/${path}`, options);
+  let value = await res.json();
+  // A 428 is issued before any mutation. Never replay network/5xx failures.
+  if (res.status === 428 && method !== "GET" && path !== "auth/elevate") {
+    if (location !== window.location.pathname + window.location.search) throw new ActionCancelled();
+    if (surface && !document.querySelector(`[data-elevation-surface="${CSS.escape(surface)}"]`))
+      throw new ActionCancelled();
+    await requestElevation(surface, protectedActionLabel(path, method), source);
+    if (location !== window.location.pathname + window.location.search) throw new ActionCancelled();
+    res = await fetch(`/api/${path}`, options);
+    value = await res.json();
+  }
   if (!res.ok) {
-    if (res.status === 401 && path !== "auth/login" && path !== "auth/elevate")
+    if (
+      res.status === 401 &&
+      path !== "auth/login" &&
+      (path !== "auth/elevate" || value.code === "SESSION_EXPIRED")
+    )
       window.dispatchEvent(new Event("blink:unauthorized"));
     throw new ApiError(res.status, value.error ?? "请求失败");
   }

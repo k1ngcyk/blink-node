@@ -18,10 +18,10 @@ export function cookieToken(headers: Headers) {
 }
 export async function owner(headers: Headers) {
   const raw = cookieToken(headers);
-  if (!raw) throw new HttpError(401, "请先登录");
+  if (!raw) throw new HttpError(401, "请先登录", "SESSION_EXPIRED");
   const rows =
     await sql`SELECT u.id,u.username,u.role,s.token_hash,s.elevated_until FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=${hash(raw)} AND s.expires_at>now()`;
-  if (!rows.length) throw new HttpError(401, "登录已过期");
+  if (!rows.length) throw new HttpError(401, "登录已过期", "SESSION_EXPIRED");
   if (rows[0].role !== "owner") throw new HttpError(403, "仅服务器所有者可操作");
   return rows[0] as {
     id: string;
@@ -33,7 +33,7 @@ export async function owner(headers: Headers) {
 }
 export function elevated(user: { elevated_until: Date }) {
   if (new Date(user.elevated_until).getTime() < Date.now())
-    throw new HttpError(428, "请在安全设置中重新验证动态验证码");
+    throw new HttpError(428, "请验证身份后继续当前操作");
 }
 export function sessionCookie(raw: string, seconds = config().sessionSeconds) {
   const c = config();

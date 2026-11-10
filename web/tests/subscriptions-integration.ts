@@ -8,7 +8,7 @@ import { once } from "node:events";
 import net from "node:net";
 import { resolve } from "node:path";
 import { WebSocket } from "ws";
-import { chromium } from "@playwright/test";
+import { chromium, expect, type WebSocketRoute } from "@playwright/test";
 
 const exec = promisify(execFile);
 const pgName = `blink-subscriptions-${randomBytes(5).toString("hex")}`;
@@ -89,7 +89,8 @@ try {
   });
   for (const file of (await readdir("drizzle")).filter((f) => f.endsWith(".sql")).sort())
     await sql.unsafe(await readFile(`drizzle/${file}`, "utf8"));
-  const { token, hash, encrypt } = await import("../src/server/crypto");
+  const { token, hash, encrypt, totp } = await import("../src/server/crypto");
+  const totpSecret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
   const { instanceInput, credentials } = await import("../src/server/proxy-model");
   const owner = randomUUID(),
     member = randomUUID(),
@@ -283,11 +284,16 @@ try {
   assert.equal((await fetch(rotated.url)).status, 200);
 
   // Real browser flow: create, copy, reload, edit, retain input after a failed save.
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({
+    headless: true,
+    args: ["--use-mock-keychain", "--password-store=basic"],
+  });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   await context.addCookies([{ name: "blink-dev", value: session, url: origin }]);
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin });
   const page = await context.newPage();
+  const shot = (name: string) =>
+    page.screenshot({ path: resolve(dir, name), animations: "disabled" });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`${origin}/`);
@@ -296,21 +302,80 @@ try {
   assert.equal(await page.getByRole("link", { name: "东京 · 主节点", exact: true }).count(), 0);
   await page.getByRole("textbox", { name: "搜索服务器" }).fill("Ubuntu");
   await page.getByRole("link", { name: "东京 · 主节点", exact: true }).waitFor();
+  await page.getByRole("link", { name: "东京 · 主节点", exact: true }).click();
+  await page.getByRole("tab", { name: "服务器设置" }).click();
+  await page.reload();
+  assert.equal(
+    await page.getByRole("tab", { name: "服务器设置" }).getAttribute("aria-selected"),
+    "true",
+  );
+  await page.getByRole("link", { name: "全部服务器", exact: true }).click();
+  assert.equal(
+    await page.getByRole("textbox", { name: "搜索服务器" }).inputValue(),
+    "Ubuntu",
+    "return to list retains filters",
+  );
   await page.getByRole("button", { name: "复制 8.8.8.8", exact: true }).click();
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "8.8.8.8");
   await page.getByRole("textbox", { name: "搜索服务器" }).fill("");
-  await page.screenshot({ path: resolve(dir, "servers-desktop.png") });
+  await expect(page.getByRole("textbox", { name: "搜索服务器" })).toHaveValue("");
+  await expect(page.locator(".server-table tbody tr")).toHaveCount(3);
+  await shot("servers-desktop.png");
+  assert.equal(await page.locator(".os-ubuntu").count(), 1);
+  assert.equal(await page.locator(".os-alpine").count(), 1);
+  await page.emulateMedia({ colorScheme: "dark" });
+  await shot("servers-dark.png");
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await shot("servers-mobile.png");
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+  await page.getByRole("button", { name: "打开导航", exact: true }).click();
+  await page.getByRole("dialog").getByRole("link", { name: "代理订阅", exact: true }).click();
+  await page.getByRole("heading", { name: "代理订阅", exact: true }).waitFor();
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole("link", { name: "代理订阅", exact: true }).click();
   await page.getByRole("heading", { name: "日常订阅", exact: true }).waitFor();
-  await page.screenshot({ path: resolve(dir, "subscriptions-desktop.png") });
+  await shot("subscriptions-desktop.png");
   await page.getByRole("button", { name: "创建订阅", exact: true }).click();
   let dialog = page.getByRole("dialog");
   await dialog.getByLabel("订阅名称").fill("手机使用");
   await dialog.getByRole("checkbox", { name: /IPv6 入口/ }).check();
   await dialog.getByRole("checkbox", { name: /日本 REALITY 入口/ }).check();
-  await page.screenshot({ path: resolve(dir, "subscription-editor-desktop.png") });
+  await shot("subscription-editor-desktop.png");
+  // Expiry is recovered inside the existing editor, without losing its draft.
+  await sql`UPDATE users SET totp_secret=${encrypt(totpSecret)} WHERE id=${owner}`;
+  await sql`UPDATE sessions SET elevated_until=now()-interval '1 minute' WHERE token_hash=${hash(session)}`;
+  let createRequests = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === `/api/${base}` && request.method() === "POST")
+      createRequests++;
+  });
   await dialog.getByRole("button", { name: "创建订阅", exact: true }).click();
+  await page.getByRole("heading", { name: "验证身份以继续" }).waitFor();
+  assert.equal(await page.getByRole("dialog").count(), 1, "verification reuses the editor surface");
+  await shot("verification-desktop.png");
+  const currentStep = Math.floor(Date.now() / 30000);
+  const validCodes = [-1, 0, 1].map((offset) => totp(totpSecret, currentStep + offset));
+  const invalidCode = ["000000", "111111", "222222", "333333"].find(
+    (code) => !validCodes.includes(code),
+  )!;
+  await dialog.getByLabel("动态验证码", { exact: true }).fill(invalidCode);
+  await dialog.getByRole("button", { name: "验证并继续", exact: true }).click();
+  await dialog.getByText("动态验证码不正确", { exact: true }).waitFor();
+  assert.equal(createRequests, 1, "invalid code must not replay a mutation");
+  await dialog.getByRole("button", { name: "返回，保留已填内容", exact: true }).click();
+  assert.equal(await dialog.getByLabel("订阅名称").inputValue(), "手机使用");
+  assert.equal(await dialog.getByRole("checkbox", { name: /IPv6 入口/ }).isChecked(), true);
+  assert.equal((await sql`SELECT id FROM proxy_subscriptions WHERE name='手机使用'`).length, 0);
+  await dialog.getByRole("button", { name: "创建订阅", exact: true }).click();
+  await page.getByRole("heading", { name: "验证身份以继续" }).waitFor();
+  await dialog
+    .getByLabel("动态验证码", { exact: true })
+    .fill(totp(totpSecret, Math.floor(Date.now() / 30000)));
+  await dialog.getByLabel("动态验证码", { exact: true }).press("Enter");
   await page.getByRole("heading", { name: "订阅链接", exact: true }).waitFor();
+  assert.equal(createRequests, 3, "two blocked attempts and exactly one resumed mutation");
+  assert.equal((await sql`SELECT id FROM proxy_subscriptions WHERE name='手机使用'`).length, 1);
   const uiUrl = await page.getByRole("textbox", { name: "订阅 URL" }).inputValue();
   await page.getByRole("button", { name: "复制订阅链接", exact: true }).click();
   await page.getByRole("button", { name: "已复制订阅链接" }).waitFor();
@@ -348,16 +413,97 @@ try {
     "手机 · 已编辑",
   );
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: resolve(dir, "subscriptions-mobile.png") });
+  await shot("subscriptions-mobile.png");
   assert(
     await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     "mobile page must not overflow horizontally",
   );
   await page.getByRole("button", { name: "创建订阅", exact: true }).click();
   await page.getByRole("dialog").getByLabel("订阅名称").fill("移动端订阅");
-  await page.screenshot({ path: resolve(dir, "subscription-editor-mobile.png") });
+  await shot("subscription-editor-mobile.png");
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
   await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();
+  // A page-level action uses the standalone challenge. Replayed TOTP stays here.
+  await sql`UPDATE sessions SET elevated_until=now()-interval '1 minute' WHERE token_hash=${hash(session)}`;
+  await page
+    .getByRole("listitem")
+    .filter({ has: page.getByRole("heading", { name: "手机 · 已编辑", exact: true }) })
+    .getByRole("button", { name: "订阅链接", exact: true })
+    .click();
+  await page.getByRole("heading", { name: "验证身份以继续" }).waitFor();
+  await shot("verification-mobile.png");
+  const replay = totp(totpSecret, Math.floor(Date.now() / 30000));
+  await sql`UPDATE users SET last_totp_step=${Math.floor(Date.now() / 30000)} WHERE id=${owner}`;
+  await page.getByRole("dialog").getByLabel("动态验证码", { exact: true }).fill(replay);
+  await page.getByRole("button", { name: "验证并继续", exact: true }).click();
+  await page.getByText("验证码已使用，请等待身份验证器显示下一组验证码", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "返回，保留已填内容", exact: true }).click();
+  assert.equal(await page.getByRole("dialog").count(), 0);
+  await sql`UPDATE sessions SET elevated_until=now()+interval '10 minutes' WHERE token_hash=${hash(session)}`;
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${origin}/settings?section=dns`);
+  await page.getByRole("heading", { name: "代理节点 · DNS 与证书" }).waitFor();
+  await shot("settings-desktop.png");
+  await page.goto(`${origin}/proxies`);
+  await page.getByRole("heading", { name: "已管理的代理" }).waitFor();
+  await page.getByLabel("代理服务器").selectOption(servers[0]);
+  await page.getByRole("cell", { name: /日本 REALITY 入口/ }).waitFor();
+  await page.getByText("节点连接与防火墙", { exact: true }).waitFor();
+  await shot("proxies-desktop.png");
+  await page.goto(`${origin}/servers/${servers[0]}`);
+  await page.getByRole("heading", { name: "东京 · 主节点", exact: true }).waitFor();
+  await shot("detail-desktop.png");
+  // Terminal tickets are real API calls; the PTY transport is simulated here.
+  await sql`UPDATE servers SET last_seen=now(),info=info || '{"terminal":true}'::jsonb WHERE id=${servers[0]}`;
+  await sql`UPDATE sessions SET elevated_until=now()-interval '1 minute' WHERE token_hash=${hash(session)}`;
+  await sql`UPDATE users SET last_totp_step=0 WHERE id=${owner}`;
+  let terminalSocket: WebSocketRoute | undefined;
+  let socketCount = 0;
+  await page.routeWebSocket("**/ws/terminal", (socket) => {
+    terminalSocket = socket;
+    socketCount++;
+    socket.onMessage((raw) => {
+      if (JSON.parse(String(raw)).type === "auth") socket.send(JSON.stringify({ type: "ready" }));
+    });
+  });
+  await page.getByRole("tab", { name: "网页终端", exact: true }).click();
+  await page.getByRole("button", { name: "连接终端", exact: true }).click();
+  await page.getByRole("heading", { name: "验证身份以继续" }).waitFor();
+  await page.getByRole("button", { name: "返回，保留已填内容", exact: true }).click();
+  assert.equal((await sql`SELECT * FROM terminal_tickets WHERE server_id=${servers[0]}`).length, 0);
+  assert.equal(socketCount, 0, "cancel must not open a terminal");
+  await page.getByRole("button", { name: "连接终端", exact: true }).click();
+  await page.getByRole("heading", { name: "验证身份以继续" }).waitFor();
+  await page
+    .getByRole("dialog")
+    .getByLabel("动态验证码", { exact: true })
+    .fill(totp(totpSecret, Math.floor(Date.now() / 30000)));
+  await page.getByRole("button", { name: "验证并继续", exact: true }).click();
+  await page.getByText("已连接", { exact: true }).waitFor();
+  assert.equal(socketCount, 1);
+  await page.getByRole("tab", { name: "监控概览", exact: true }).click();
+  await page.getByRole("tab", { name: "网页终端", exact: true }).click();
+  await page.getByText("已连接", { exact: true }).waitFor();
+  assert.equal(socketCount, 1, "switching tabs preserves the terminal session");
+  await terminalSocket!.close({ code: 1000 });
+  await page.getByRole("button", { name: "重新连接", exact: true }).click();
+  await page.getByText("已连接", { exact: true }).waitFor();
+  assert.equal(socketCount, 2, "explicit reconnect creates one replacement socket");
+  await shot("terminal-desktop.png");
+  await page.getByRole("button", { name: "关闭会话 1", exact: true }).click();
+  // If the login itself expires during verification, go to login, not an OTP retry loop.
+  await sql`UPDATE sessions SET elevated_until=now()-interval '1 minute' WHERE token_hash=${hash(session)}`;
+  await page.getByRole("button", { name: "连接终端", exact: true }).click();
+  await page.getByRole("heading", { name: "验证身份以继续" }).waitFor();
+  await sql`UPDATE sessions SET expires_at=now()-interval '1 minute' WHERE token_hash=${hash(session)}`;
+  await page.getByRole("dialog").getByLabel("动态验证码", { exact: true }).fill("123456");
+  await page.getByRole("button", { name: "验证并继续", exact: true }).click();
+  await page.waitForURL("**/login");
+  await page.getByRole("heading", { name: "登录控制台" }).waitFor();
+  await shot("login-desktop.png");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await shot("login-mobile.png");
+  await sql`UPDATE sessions SET expires_at=now()+interval '1 hour',elevated_until=now()+interval '10 minutes' WHERE token_hash=${hash(session)}`;
   assert.deepEqual(errors, [], "browser must not report uncaught application errors");
 
   // Dynamic export must reflect updates and deletion without regenerating the URL.

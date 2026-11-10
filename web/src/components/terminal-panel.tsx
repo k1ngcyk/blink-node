@@ -6,7 +6,17 @@ import { api, wsUrl } from "@/lib/client";
 import { ErrorBanner } from "./common";
 import "@xterm/xterm/css/xterm.css";
 
-function TerminalSession({ serverId, active }: { serverId: string; active: boolean }) {
+function TerminalSession({
+  ticket,
+  active,
+  onReconnect,
+  busy,
+}: {
+  ticket: string;
+  active: boolean;
+  onReconnect: () => void;
+  busy: boolean;
+}) {
   const element = useRef<HTMLDivElement>(null);
   const [state, setState] = useState("正在授权…"),
     [error, setError] = useState("");
@@ -15,10 +25,9 @@ function TerminalSession({ serverId, active }: { serverId: string; active: boole
     let socket: WebSocket | undefined;
     let cleanup = () => {};
     void (async () => {
-      const [{ Terminal }, { FitAddon }, auth] = await Promise.all([
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
         import("@xterm/xterm"),
         import("@xterm/addon-fit"),
-        api<{ ticket: string }>(`servers/${serverId}/terminal-ticket`, "POST", {}),
       ]);
       if (disposed || !element.current) return;
       const terminal = new Terminal({
@@ -49,7 +58,7 @@ function TerminalSession({ serverId, active }: { serverId: string; active: boole
         if (ready && socket?.readyState === WebSocket.OPEN)
           socket.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }));
       };
-      socket.onopen = () => socket?.send(JSON.stringify({ type: "auth", ticket: auth.ticket }));
+      socket.onopen = () => socket?.send(JSON.stringify({ type: "auth", ticket }));
       socket.onmessage = (e) => {
         if (e.data instanceof ArrayBuffer) terminal.write(new Uint8Array(e.data));
         else {
@@ -70,7 +79,7 @@ function TerminalSession({ serverId, active }: { serverId: string; active: boole
         if (!disposed) {
           setState("已断开");
           if (e.code !== 1000)
-            setError("终端连接已关闭，请检查授权、Agent 配置或连接状态。重新验证可在设置中完成。");
+            setError("终端连接已关闭。请重新连接；如仍失败，检查 Agent 配置与网络状态。");
         }
       };
       socket.onerror = () => {
@@ -100,7 +109,7 @@ function TerminalSession({ serverId, active }: { serverId: string; active: boole
       socket?.close();
       cleanup();
     };
-  }, [serverId]);
+  }, [ticket]);
   return (
     <div style={{ display: active ? "block" : "none" }}>
       <div className="panel-header">
@@ -109,6 +118,11 @@ function TerminalSession({ serverId, active }: { serverId: string; active: boole
           {state}
         </span>
         <span className="muted text-xs">空闲 15 分钟后断开 · 输入不会被记录</span>
+        {(state === "已断开" || state === "连接失败") && (
+          <Button size="sm" variant="outline" disabled={busy} onClick={onReconnect}>
+            重新连接
+          </Button>
+        )}
       </div>
       <ErrorBanner error={error} />
       <div className="terminal-surface">
@@ -118,13 +132,36 @@ function TerminalSession({ serverId, active }: { serverId: string; active: boole
   );
 }
 export function TerminalPanel({ serverId, enabled }: { serverId: string; enabled: boolean }) {
-  const [sessions, setSessions] = useState<number[]>([]),
-    [active, setActive] = useState(0);
+  const [sessions, setSessions] = useState<{ id: number; ticket: string }[]>([]),
+    [active, setActive] = useState(0),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const connecting = useRef(false);
   const sequence = useRef(0);
-  function add() {
-    const id = ++sequence.current;
-    setSessions((s) => [...s, id]);
-    setActive(id);
+  async function connect(existingId?: number) {
+    if (connecting.current) return;
+    connecting.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      const { ticket } = await api<{ ticket: string }>(
+        `servers/${serverId}/terminal-ticket`,
+        "POST",
+        {},
+      );
+      const id = existingId ?? ++sequence.current;
+      setSessions((sessions) =>
+        existingId
+          ? sessions.map((s) => (s.id === id ? { id, ticket } : s))
+          : [...sessions, { id, ticket }],
+      );
+      setActive(id);
+    } catch (error) {
+      setError((error as Error).message);
+    } finally {
+      connecting.current = false;
+      setBusy(false);
+    }
   }
   if (!enabled)
     return (
@@ -137,7 +174,7 @@ export function TerminalPanel({ serverId, enabled }: { serverId: string; enabled
     <section className="panel">
       <div className="panel-header">
         <div className="row">
-          {sessions.map((id) => (
+          {sessions.map(({ id }) => (
             <div className="row" key={id}>
               <Button
                 size="sm"
@@ -151,8 +188,8 @@ export function TerminalPanel({ serverId, enabled }: { serverId: string; enabled
                 variant="ghost"
                 aria-label={`关闭会话 ${id}`}
                 onClick={() => {
-                  setSessions((s) => s.filter((i) => i !== id));
-                  if (active === id) setActive(sessions.find((i) => i !== id) ?? 0);
+                  setSessions((s) => s.filter((i) => i.id !== id));
+                  if (active === id) setActive(sessions.find((i) => i.id !== id)?.id ?? 0);
                 }}
               >
                 <IconX size={13} />
@@ -160,21 +197,35 @@ export function TerminalPanel({ serverId, enabled }: { serverId: string; enabled
             </div>
           ))}
         </div>
-        <Button size="sm" variant="outline" disabled={sessions.length >= 4} onClick={add}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy || sessions.length >= 4}
+          onClick={() => void connect()}
+        >
           <IconPlus size={15} />
           新建会话
         </Button>
       </div>
+      <ErrorBanner error={error} />
       {sessions.length ? (
-        sessions.map((id) => (
-          <TerminalSession key={id} serverId={serverId} active={id === active} />
+        sessions.map(({ id, ticket }) => (
+          <TerminalSession
+            key={ticket}
+            ticket={ticket}
+            active={id === active}
+            busy={busy}
+            onReconnect={() => void connect(id)}
+          />
         ))
       ) : (
         <div className="empty">
           <IconTerminal2 size={30} />
           <h2>连接到服务器终端</h2>
           <p>会话通过加密通道连接到 Agent 配置的 Unix 用户。关闭页面将结束会话。</p>
-          <Button onClick={add}>连接终端</Button>
+          <Button disabled={busy} onClick={() => void connect()}>
+            {busy ? "正在连接…" : "连接终端"}
+          </Button>
         </div>
       )}
     </section>

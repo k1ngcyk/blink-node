@@ -1,15 +1,17 @@
 "use client";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { IconLock, IconArrowRight } from "@tabler/icons-react";
+import { IconLock, IconArrowRight, IconEye, IconEyeOff } from "@tabler/icons-react";
 import { Brand } from "./shell";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { api } from "@/lib/client";
+import { OtpInput } from "./otp-input";
 export function Login() {
   const router = useRouter();
   const [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [showPassword, setShowPassword] = useState(false);
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
@@ -75,25 +77,26 @@ export function Login() {
             </label>
             <label className="field">
               密码
-              <Input
-                name="password"
-                type="password"
-                autoComplete="current-password"
-                required
-                maxLength={256}
-              />
+              <span className="password-field">
+                <Input
+                  name="password"
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="current-password"
+                  required
+                  maxLength={256}
+                />
+                <button
+                  type="button"
+                  aria-label={showPassword ? "隐藏密码" : "显示密码"}
+                  onClick={() => setShowPassword(!showPassword)}
+                >
+                  {showPassword ? <IconEyeOff size={18} /> : <IconEye size={18} />}
+                </button>
+              </span>
             </label>
             <label className="field">
               动态验证码
-              <Input
-                name="code"
-                inputMode="numeric"
-                pattern="[0-9]{6}"
-                maxLength={6}
-                autoComplete="one-time-code"
-                required
-                placeholder="6 位验证码"
-              />
+              <OtpInput aria-invalid={!!error} />
               <small>在你的身份验证器中查看验证码。</small>
             </label>
             {error && (

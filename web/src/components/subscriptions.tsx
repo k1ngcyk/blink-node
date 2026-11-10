@@ -13,6 +13,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./ui/dialog";
 import { Empty, ErrorBanner, Loading } from "./common";
+import { MoreActions } from "./more-actions";
 
 const endpoint = "proxy/subscriptions";
 type Draft = { name: string; enabled: boolean; nodeIds: string[] };
@@ -200,7 +201,7 @@ function SubscriptionEditor({
             个入口。停用或部署中的已选节点会暂时跳过，恢复后自动加入。
           </p>
           <ErrorBanner error={error} />
-          <div className="row justify-end">
+          <div className="form-actions">
             <Button variant="outline" type="button" disabled={busy} onClick={onClose}>
               取消
             </Button>
@@ -384,44 +385,37 @@ export function Subscriptions() {
                       >
                         编辑
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
+                      <MoreActions
+                        label={`管理 ${item.name}`}
                         disabled={busy}
-                        onClick={() =>
-                          void act(async () => {
-                            await api(`${endpoint}/${item.id}`, "PATCH", {
-                              enabled: !item.enabled,
-                            });
-                            setMessage(`「${item.name}」已${item.enabled ? "停用" : "启用"}`);
-                          })
-                        }
-                      >
-                        {item.enabled ? "停用" : "启用"}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busy}
-                        onClick={() => {
-                          setConfirmError("");
-                          setConfirmation({ item, action: "rotate" });
-                        }}
-                      >
-                        重置链接
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="text-destructive"
-                        disabled={busy}
-                        onClick={() => {
-                          setConfirmError("");
-                          setConfirmation({ item, action: "delete" });
-                        }}
-                      >
-                        删除
-                      </Button>
+                        items={[
+                          {
+                            label: item.enabled ? "停用订阅" : "启用订阅",
+                            onSelect: () =>
+                              void act(async () => {
+                                await api(`${endpoint}/${item.id}`, "PATCH", {
+                                  enabled: !item.enabled,
+                                });
+                                setMessage(`「${item.name}」已${item.enabled ? "停用" : "启用"}`);
+                              }),
+                          },
+                          {
+                            label: "重置链接",
+                            onSelect: () => {
+                              setConfirmError("");
+                              setConfirmation({ item, action: "rotate" });
+                            },
+                          },
+                          {
+                            label: "删除订阅",
+                            destructive: true,
+                            onSelect: () => {
+                              setConfirmError("");
+                              setConfirmation({ item, action: "delete" });
+                            },
+                          },
+                        ]}
+                      />
                     </div>
                   </li>
                 );

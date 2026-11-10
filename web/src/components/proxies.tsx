@@ -11,6 +11,7 @@ import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./ui/dialog";
 import { ErrorBanner } from "./common";
+import { useQueryState } from "@/lib/query-state";
 
 type Instance = {
   id: string;
@@ -97,8 +98,8 @@ export function Proxies({ serverId }: { serverId?: string }) {
   const servers = useResource<Server[]>("servers", 10000),
     instances = useResource<Instance[]>("proxy/instances", 5000),
     exits = useResource<Exit[]>("proxy/exits", 5000);
-  const [selected, setSelected] = useState(""),
-    [editing, setEditing] = useState<Instance | "new" | null>(null),
+  const [selected, setSelected] = useQueryState("server");
+  const [editing, setEditing] = useState<Instance | "new" | null>(null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [detail, setDetail] = useState<{ title: string; value: unknown } | null>(null),
@@ -149,7 +150,7 @@ export function Proxies({ serverId }: { serverId?: string }) {
             <h1>代理服务</h1>
             <p>入口、SS2022 落地与服务端分流。节点自动管理安装和证书续期。</p>
           </div>
-          <Link href="/settings" className="muted text-sm">
+          <Link href="/settings?section=dns" className="muted text-sm">
             DNS 与证书设置
           </Link>
         </div>
@@ -160,6 +161,7 @@ export function Proxies({ serverId }: { serverId?: string }) {
           <select
             aria-label="代理服务器"
             value={selectedId || ""}
+            disabled={busy}
             onChange={(e) => setSelected(e.target.value)}
           >
             <option value="" disabled>
@@ -197,13 +199,22 @@ export function Proxies({ serverId }: { serverId?: string }) {
         </div>
       )}
       {selectedId && (
-        <section className="panel mb-5">
-          <div className="panel-header">
-            <h2>节点连接与防火墙</h2>
-            <small className="muted">
-              配置版本 {host.data?.applied_version ?? 0} / {host.data?.desired_version ?? 0}
-            </small>
-          </div>
+        <details
+          className="panel node-config mb-5"
+          key={selectedId}
+          open={draft || (host.data && !host.data.addresses.length) ? true : undefined}
+        >
+          <summary>
+            <span>
+              <strong>节点连接与防火墙</strong>
+              <span className="subline">
+                {host.data?.addresses.join(" · ") || "尚未配置公网 IP"} · UFW {ufwLabel}
+              </span>
+            </span>
+            <span className="muted text-xs">
+              配置 {host.data?.applied_version ?? 0} / {host.data?.desired_version ?? 0}
+            </span>
+          </summary>
           <form
             key={selectedId}
             className="panel-body"
@@ -341,7 +352,7 @@ export function Proxies({ serverId }: { serverId?: string }) {
               </Button>
             </div>
           </form>
-        </section>
+        </details>
       )}
       <section className="panel">
         <div className="panel-header">
@@ -474,6 +485,7 @@ export function Proxies({ serverId }: { serverId?: string }) {
           </p>
         )}
       </section>
+      <DeploymentJobs jobs={host.data?.jobs ?? []} />
       {!!exits.data?.some(
         (item) => item.source === "imported" && item.server_id === selectedId,
       ) && (
@@ -592,42 +604,6 @@ export function Proxies({ serverId }: { serverId?: string }) {
           )}
         </div>
       </section>
-      <section className="panel section-gap">
-        <div className="panel-header">
-          <h2>部署任务</h2>
-          <small className="muted">配置校验 · 自动回滚 · 断线重试</small>
-        </div>
-        <div className="panel-body">
-          <ul className="plain-list">
-            {host.data?.jobs.map((job) => (
-              <li key={job.id}>
-                <div className="row between">
-                  <strong className="font-medium">
-                    {job.operation === "scan"
-                      ? "扫描服务"
-                      : job.operation === "firewall"
-                        ? "同步出口 UFW"
-                        : "应用节点配置"}
-                  </strong>
-                  <span className={job.state === "failed" ? "error-text" : "muted"}>
-                    {states[job.state]}
-                  </span>
-                </div>
-                <span className="subline">
-                  {when(job.created_at)} ·{" "}
-                  {job.result?.error || job.result?.message || "等待节点完成"}
-                </span>
-                {job.result?.warnings?.map((w) => (
-                  <span className="subline" key={w}>
-                    {w}
-                  </span>
-                ))}
-              </li>
-            ))}
-          </ul>
-          {!host.data?.jobs.length && <p className="muted text-sm">暂无任务。</p>}
-        </div>
-      </section>
       <Dialog
         open={!!editing}
         onOpenChange={(open) => {
@@ -700,6 +676,59 @@ export function Proxies({ serverId }: { serverId?: string }) {
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+function DeploymentJobs({ jobs }: { jobs: Host["jobs"] }) {
+  return (
+    <section className="panel section-gap">
+      <div className="panel-header">
+        <h2>部署任务</h2>
+        <small className="muted">配置校验 · 自动回滚 · 断线重试</small>
+      </div>
+      <div className="panel-body">
+        <ul className="plain-list">
+          {jobs.map((job) => (
+            <li key={job.id}>
+              <div className="row between">
+                <strong className="font-medium">
+                  {job.operation === "scan"
+                    ? "扫描服务"
+                    : job.operation === "firewall"
+                      ? "同步出口 UFW"
+                      : "应用节点配置"}
+                </strong>
+                <span
+                  className={
+                    job.state === "failed"
+                      ? "error-text"
+                      : job.state === "done"
+                        ? "success"
+                        : "muted"
+                  }
+                >
+                  {states[job.state]}
+                </span>
+              </div>
+              <span className="subline">
+                {when(job.created_at)} ·{" "}
+                {job.result?.error ||
+                  job.result?.message ||
+                  (job.state === "done" ? "节点配置已更新" : "等待节点完成")}
+              </span>
+              {job.result?.warnings?.map((warning) => (
+                <span className="subline" key={warning}>
+                  {warning}
+                </span>
+              ))}
+            </li>
+          ))}
+        </ul>
+        {!jobs.length && (
+          <p className="muted text-sm">暂无部署任务。安装或修改服务后，可在这里查看执行结果。</p>
+        )}
+      </div>
+    </section>
   );
 }
 

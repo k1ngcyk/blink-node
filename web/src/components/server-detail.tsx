@@ -22,14 +22,22 @@ import { ErrorBanner, Loading, ServerStatus, Meter } from "./common";
 import { MetricCharts, type History } from "./metric-charts";
 import { EnrollmentView } from "./dashboard";
 import { Proxies } from "./proxies";
+import { SystemIdentity } from "./system-identity";
+import { useQueryState } from "@/lib/query-state";
 const TerminalPanel = dynamic(() => import("./terminal-panel").then((m) => m.TerminalPanel), {
   ssr: false,
   loading: () => <Loading />,
 });
 export function ServerDetail({ id }: { id: string }) {
   const { data: s, error, loading, refresh } = useResource<Server>(`servers/${id}`, 5000);
-  const [tab, setTab] = useState("overview"),
-    [range, setRange] = useState("1h");
+  const [requestedTab, setTab] = useQueryState("tab", "overview"),
+    [requestedRange, setRange] = useQueryState("range", "1h"),
+    [from] = useQueryState("from", "/");
+  const tab = ["overview", "terminal", "diagnostics", "proxy", "settings"].includes(requestedTab)
+    ? requestedTab
+    : "overview";
+  const range = ["1h", "24h", "7d", "30d", "1y"].includes(requestedRange) ? requestedRange : "1h";
+  const returnTo = from === "/" || from.startsWith("/?") ? from : "/";
   const history = useResource<History[]>(
     `servers/${id}/history?range=${range}`,
     range === "1h" ? 15000 : 60000,
@@ -40,7 +48,7 @@ export function ServerDetail({ id }: { id: string }) {
     online = status(s) === "online";
   return (
     <>
-      <Link href="/" className="row muted text-xs mb-4">
+      <Link href={returnTo} className="row muted text-xs mb-4">
         <IconArrowLeft size={14} />
         全部服务器
       </Link>
@@ -50,9 +58,12 @@ export function ServerDetail({ id }: { id: string }) {
             <h1>{s.name}</h1>
             <ServerStatus server={s} />
           </div>
-          <p>
-            {s.group_name} · {s.info.os ?? "等待首次接入"} · {s.info.arch ?? "—"}
-          </p>
+          <div className="detail-identity">
+            <SystemIdentity os={s.info.os} />
+            <span className="muted text-xs">
+              {s.group_name} · {s.info.arch ?? "—"}
+            </span>
+          </div>
         </div>
         <Button variant="outline" onClick={() => setTab("terminal")}>
           <IconTerminal2 size={16} />
@@ -68,191 +79,228 @@ export function ServerDetail({ id }: { id: string }) {
           { id: "proxy", name: "代理服务" },
           { id: "settings", name: "服务器设置" },
         ].map((t) => (
-          <button role="tab" aria-selected={tab === t.id} key={t.id} onClick={() => setTab(t.id)}>
+          <button
+            role="tab"
+            id={`server-tab-${t.id}`}
+            aria-controls={`server-panel-${t.id}`}
+            tabIndex={tab === t.id ? 0 : -1}
+            aria-selected={tab === t.id}
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            onKeyDown={(event) => {
+              const buttons = Array.from(
+                event.currentTarget.parentElement!.querySelectorAll<HTMLButtonElement>(
+                  "[role=tab]",
+                ),
+              );
+              const index = buttons.indexOf(event.currentTarget);
+              const next =
+                event.key === "ArrowRight"
+                  ? (index + 1) % buttons.length
+                  : event.key === "ArrowLeft"
+                    ? (index + buttons.length - 1) % buttons.length
+                    : event.key === "Home"
+                      ? 0
+                      : event.key === "End"
+                        ? buttons.length - 1
+                        : -1;
+              if (next >= 0) {
+                event.preventDefault();
+                buttons[next].focus();
+                buttons[next].click();
+              }
+            }}
+          >
             {t.name}
           </button>
         ))}
       </div>
-      {tab === "overview" && (
-        <>
-          <div className="stats">
-            <div className="stat">
-              <div className="stat-label">
-                CPU 使用率
-                <IconCpu size={17} />
-              </div>
-              <div className="stat-value">{percent(online ? m?.cpu : null)}</div>
-              <div className="stat-note">
-                {s.info.cpuCount ?? "—"} 核 · 负载{" "}
-                {m?.load?.map((n) => n.toFixed(2)).join(" / ") ?? "—"}
-              </div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">
-                内存使用
-                <IconDatabase size={17} />
-              </div>
-              <div className="stat-value">{percent(online ? m?.memory : null)}</div>
-              <div className="stat-note">
-                {bytes(m?.memoryUsed)} / {bytes(m?.memoryTotal)}
-              </div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">
-                本周期流量
-                <IconNetwork size={17} />
-              </div>
-              <div className="stat-value">
-                {s.traffic ? bytes(s.traffic.rx + s.traffic.tx) : "—"}
-              </div>
-              <div className="stat-note">
-                {s.traffic?.start ?? "—"} 起 ·{" "}
-                {s.quota_bytes ? `配额 ${bytes(Number(s.quota_bytes))}` : "未设置配额"}
-              </div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">
-                持续运行
-                <IconClock size={17} />
-              </div>
-              <div className="stat-value" style={{ fontSize: 22 }}>
-                {m ? uptime(m.uptime) : "—"}
-              </div>
-              <div className="stat-note">最近心跳 {when(s.last_seen)}</div>
-            </div>
-          </div>
-          <div className="row between mb-3">
-            <h2>历史趋势</h2>
-            <select
-              aria-label="历史时间范围"
-              value={range}
-              onChange={(e) => setRange(e.target.value)}
-            >
-              <option value="1h">最近 1 小时</option>
-              <option value="24h">最近 24 小时</option>
-              <option value="7d">最近 7 天</option>
-              <option value="30d">最近 30 天</option>
-              <option value="1y">最近 1 年</option>
-            </select>
-          </div>
-          <ErrorBanner error={history.error} retry={history.refresh} />
-          <MetricCharts data={history.data ?? []} />
-          <div className="detail-grid section-gap">
-            <div className="stack">
-              <section className="panel">
-                <div className="panel-header">
-                  <h2>磁盘与存储</h2>
-                  <small className="muted">
-                    读 {bytes(m?.diskReadRate)}/s · 写 {bytes(m?.diskWriteRate)}/s
-                  </small>
+      <div role="tabpanel" id={`server-panel-${tab}`} aria-labelledby={`server-tab-${tab}`}>
+        {tab === "overview" && (
+          <>
+            <div className="stats">
+              <div className="stat">
+                <div className="stat-label">
+                  CPU 使用率
+                  <IconCpu size={17} />
                 </div>
-                <div className="table-scroll">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>挂载点</th>
-                        <th>已用 / 容量</th>
-                        <th>使用率</th>
-                        <th>inode 使用率</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {m?.disks?.map((d) => (
-                        <tr key={`${d.name}:${d.mount}`}>
-                          <td className="mono">
-                            {d.mount}
-                            <span className="subline">{d.name}</span>
-                          </td>
-                          <td className="mono">
-                            {bytes(d.used)} / {bytes(d.total)}
-                          </td>
-                          <td>
-                            <Meter value={d.total ? (d.used / d.total) * 100 : 0} />
-                          </td>
-                          <td className="mono">
-                            {d.inodesTotal
-                              ? percent(((d.inodesUsed ?? 0) / d.inodesTotal) * 100)
-                              : "不可用"}
-                          </td>
+                <div className="stat-value">{percent(online ? m?.cpu : null)}</div>
+                <div className="stat-note">
+                  {s.info.cpuCount ?? "—"} 核 · 负载{" "}
+                  {m?.load?.map((n) => n.toFixed(2)).join(" / ") ?? "—"}
+                </div>
+              </div>
+              <div className="stat">
+                <div className="stat-label">
+                  内存使用
+                  <IconDatabase size={17} />
+                </div>
+                <div className="stat-value">{percent(online ? m?.memory : null)}</div>
+                <div className="stat-note">
+                  {bytes(m?.memoryUsed)} / {bytes(m?.memoryTotal)}
+                </div>
+              </div>
+              <div className="stat">
+                <div className="stat-label">
+                  本周期流量
+                  <IconNetwork size={17} />
+                </div>
+                <div className="stat-value">
+                  {s.traffic ? bytes(s.traffic.rx + s.traffic.tx) : "—"}
+                </div>
+                <div className="stat-note">
+                  {s.traffic?.start ?? "—"} 起 ·{" "}
+                  {s.quota_bytes ? `配额 ${bytes(Number(s.quota_bytes))}` : "未设置配额"}
+                </div>
+              </div>
+              <div className="stat">
+                <div className="stat-label">
+                  持续运行
+                  <IconClock size={17} />
+                </div>
+                <div className="stat-value" style={{ fontSize: 22 }}>
+                  {m ? uptime(m.uptime) : "—"}
+                </div>
+                <div className="stat-note">最近心跳 {when(s.last_seen)}</div>
+              </div>
+            </div>
+            <div className="row between mb-3">
+              <h2>历史趋势</h2>
+              <select
+                aria-label="历史时间范围"
+                value={range}
+                onChange={(e) => setRange(e.target.value)}
+              >
+                <option value="1h">最近 1 小时</option>
+                <option value="24h">最近 24 小时</option>
+                <option value="7d">最近 7 天</option>
+                <option value="30d">最近 30 天</option>
+                <option value="1y">最近 1 年</option>
+              </select>
+            </div>
+            <ErrorBanner error={history.error} retry={history.refresh} />
+            <MetricCharts data={history.data ?? []} />
+            <div className="detail-grid section-gap">
+              <div className="stack">
+                <section className="panel">
+                  <div className="panel-header">
+                    <h2>磁盘与存储</h2>
+                    <small className="muted">
+                      读 {bytes(m?.diskReadRate)}/s · 写 {bytes(m?.diskWriteRate)}/s
+                    </small>
+                  </div>
+                  <div className="table-scroll">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>挂载点</th>
+                          <th>已用 / 容量</th>
+                          <th>使用率</th>
+                          <th>inode 使用率</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {!m?.disks?.length && <p className="panel-body muted text-xs">暂无磁盘数据</p>}
-              </section>
-              <section className="panel">
-                <div className="panel-header">
-                  <h2>网卡流量</h2>
-                  <small className="muted">周期累计 / 实时速率</small>
-                </div>
-                <div className="table-scroll">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>网卡</th>
-                        <th>接收</th>
-                        <th>发送</th>
-                        <th>本周期累计</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {m?.networks?.map((n) => {
-                        const t = s.traffic?.interfaces.find((t) => t.interface === n.name);
-                        return (
-                          <tr key={n.name}>
-                            <td className="mono">{n.name}</td>
-                            <td className="mono">{bytes(n.rxRate)}/s</td>
-                            <td className="mono">{bytes(n.txRate)}/s</td>
-                            <td className="mono">{t ? bytes(t.rx + t.tx) : "—"}</td>
+                      </thead>
+                      <tbody>
+                        {m?.disks?.map((d) => (
+                          <tr key={`${d.name}:${d.mount}`}>
+                            <td className="mono">
+                              {d.mount}
+                              <span className="subline">{d.name}</span>
+                            </td>
+                            <td className="mono">
+                              {bytes(d.used)} / {bytes(d.total)}
+                            </td>
+                            <td>
+                              <Meter value={d.total ? (d.used / d.total) * 100 : 0} />
+                            </td>
+                            <td className="mono">
+                              {d.inodesTotal
+                                ? percent(((d.inodesUsed ?? 0) / d.inodesTotal) * 100)
+                                : "不可用"}
+                            </td>
                           </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {!m?.disks?.length && <p className="panel-body muted text-xs">暂无磁盘数据</p>}
+                </section>
+                <section className="panel">
+                  <div className="panel-header">
+                    <h2>网卡流量</h2>
+                    <small className="muted">周期累计 / 实时速率</small>
+                  </div>
+                  <div className="table-scroll">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>网卡</th>
+                          <th>接收</th>
+                          <th>发送</th>
+                          <th>本周期累计</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {m?.networks?.map((n) => {
+                          const t = s.traffic?.interfaces.find((t) => t.interface === n.name);
+                          return (
+                            <tr key={n.name}>
+                              <td className="mono">{n.name}</td>
+                              <td className="mono">{bytes(n.rxRate)}/s</td>
+                              <td className="mono">{bytes(n.txRate)}/s</td>
+                              <td className="mono">{t ? bytes(t.rx + t.tx) : "—"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </div>
+              <section className="panel self-start">
+                <div className="panel-header">
+                  <h2>主机信息</h2>
+                </div>
+                <div className="panel-body">
+                  <dl className="kv">
+                    <dt>主机名</dt>
+                    <dd>{s.info.hostname ?? "—"}</dd>
+                    <dt>CPU 型号</dt>
+                    <dd>{s.info.cpuModel ?? "—"}</dd>
+                    <dt>内核</dt>
+                    <dd className="mono">{s.info.kernel ?? "—"}</dd>
+                    <dt>Agent 版本</dt>
+                    <dd className="mono">{s.info.version ?? "—"}</dd>
+                    <dt>Swap</dt>
+                    <dd>
+                      {bytes(m?.swapUsed)} / {bytes(m?.swapTotal)}
+                    </dd>
+                    <dt>温度</dt>
+                    <dd>
+                      {m?.temperatures?.length
+                        ? m.temperatures
+                            .map((t) => `${t.name}: ${t.value.toFixed(1)}°C`)
+                            .join(" · ")
+                        : "设备未提供"}
+                    </dd>
+                    <dt>标签</dt>
+                    <dd>{s.tags.join(" · ") || "—"}</dd>
+                    <dt>最后采样</dt>
+                    <dd>{when(s.latest_at)}</dd>
+                    <dt>备注</dt>
+                    <dd>{s.notes || "—"}</dd>
+                  </dl>
                 </div>
               </section>
             </div>
-            <section className="panel self-start">
-              <div className="panel-header">
-                <h2>主机信息</h2>
-              </div>
-              <div className="panel-body">
-                <dl className="kv">
-                  <dt>主机名</dt>
-                  <dd>{s.info.hostname ?? "—"}</dd>
-                  <dt>CPU 型号</dt>
-                  <dd>{s.info.cpuModel ?? "—"}</dd>
-                  <dt>内核</dt>
-                  <dd className="mono">{s.info.kernel ?? "—"}</dd>
-                  <dt>Agent 版本</dt>
-                  <dd className="mono">{s.info.version ?? "—"}</dd>
-                  <dt>Swap</dt>
-                  <dd>
-                    {bytes(m?.swapUsed)} / {bytes(m?.swapTotal)}
-                  </dd>
-                  <dt>温度</dt>
-                  <dd>
-                    {m?.temperatures?.length
-                      ? m.temperatures.map((t) => `${t.name}: ${t.value.toFixed(1)}°C`).join(" · ")
-                      : "设备未提供"}
-                  </dd>
-                  <dt>标签</dt>
-                  <dd>{s.tags.join(" · ") || "—"}</dd>
-                  <dt>最后采样</dt>
-                  <dd>{when(s.latest_at)}</dd>
-                  <dt>备注</dt>
-                  <dd>{s.notes || "—"}</dd>
-                </dl>
-              </div>
-            </section>
-          </div>
-        </>
-      )}
-      {tab === "terminal" && <TerminalPanel serverId={id} enabled={online && !!s.info.terminal} />}
-      {tab === "diagnostics" && <Diagnostics server={s} />}
-      {tab === "proxy" && <Proxies serverId={id} />}
-      {tab === "settings" && <ServerSettings server={s} refresh={refresh} />}
+          </>
+        )}
+        <div hidden={tab !== "terminal"}>
+          <TerminalPanel serverId={id} enabled={online && !!s.info.terminal} />
+        </div>
+        {tab === "diagnostics" && <Diagnostics server={s} />}
+        {tab === "proxy" && <Proxies serverId={id} />}
+        {tab === "settings" && <ServerSettings server={s} refresh={refresh} />}
+      </div>
     </>
   );
 }
@@ -450,13 +498,17 @@ function ServerSettings({ server: s, refresh }: { server: Server; refresh: () =>
           <div className="row">
             <Button
               variant="outline"
+              disabled={busy}
               onClick={async () => {
+                setBusy(true);
                 setError("");
                 try {
                   setEnrollment(await api(`servers/${s.id}/enrollment`, "POST", {}));
                   refresh();
                 } catch (e) {
                   setError((e as Error).message);
+                } finally {
+                  setBusy(false);
                 }
               }}
             >
@@ -476,16 +528,21 @@ function ServerSettings({ server: s, refresh }: { server: Server; refresh: () =>
               Agent 和终端连接将在最多 10 秒内关闭。重新接入需要生成新凭证。
             </DialogDescription>
           </DialogHeader>
+          <ErrorBanner error={error} />
           <Button
             variant="destructive"
+            disabled={busy}
             onClick={async () => {
+              setBusy(true);
+              setError("");
               try {
                 await api(`servers/${s.id}/revoke`, "POST", {});
                 setRevoke(false);
                 refresh();
               } catch (e) {
                 setError((e as Error).message);
-                setRevoke(false);
+              } finally {
+                setBusy(false);
               }
             }}
           >
