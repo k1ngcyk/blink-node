@@ -295,7 +295,13 @@ export function ServerDetail({ id }: { id: string }) {
           </>
         )}
         <div hidden={tab !== "terminal"}>
-          <TerminalPanel serverId={id} enabled={online && !!s.info.terminal} />
+          <TerminalPanel
+            key={id}
+            serverId={id}
+            serverName={s.name}
+            enabled={online && !!s.info.terminal}
+            visible={tab === "terminal"}
+          />
         </div>
         {tab === "diagnostics" && <Diagnostics server={s} />}
         {tab === "proxy" && <Proxies serverId={id} />}

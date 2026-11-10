@@ -25,6 +25,7 @@
     "@radix-ui/react-slot": "latest",
     "@tabler/icons-react": "latest",
     "@xterm/addon-fit": "latest",
+    "@xterm/addon-search": "^0.16.0",
     "@xterm/xterm": "latest",
     "class-variance-authority": "latest",
     "clsx": "latest",

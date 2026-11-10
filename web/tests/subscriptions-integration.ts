@@ -959,11 +959,27 @@ try {
   await sql`UPDATE users SET last_totp_step=0 WHERE id=${owner}`;
   let terminalSocket: WebSocketRoute | undefined;
   let socketCount = 0;
+  let closedSockets = 0;
+  const terminalInputs: string[] = [];
+  const terminalSizes: { cols: number; rows: number }[] = [];
   await page.routeWebSocket("**/ws/terminal", (socket) => {
     terminalSocket = socket;
     socketCount++;
     socket.onMessage((raw) => {
-      if (JSON.parse(String(raw)).type === "auth") socket.send(JSON.stringify({ type: "ready" }));
+      const message = JSON.parse(String(raw));
+      if (message.type === "auth") {
+        socket.send(JSON.stringify({ type: "ready" }));
+        socket.send(
+          Buffer.from(
+            "\x1b[32mblink@tokyo\x1b[0m:~$ systemctl status blink-agent\r\n\x1b[32m●\x1b[0m blink-agent.service — Blink Node Agent\r\n  Active: active (running)\r\n  Memory: 18.4M\r\n\r\n\x1b[32mblink@tokyo\x1b[0m:~$ ",
+          ),
+        );
+      }
+      if (message.type === "input") terminalInputs.push(message.data);
+      if (message.type === "resize") terminalSizes.push(message);
+    });
+    socket.onClose(() => {
+      closedSockets++;
     });
   });
   await page.getByRole("tab", { name: "网页终端", exact: true }).click();
@@ -981,16 +997,169 @@ try {
   await page.getByRole("button", { name: "验证并继续", exact: true }).click();
   await page.getByText("已连接", { exact: true }).waitFor();
   assert.equal(socketCount, 1);
+  const firstTerminalSocket = terminalSocket!;
+  await expect.poll(() => terminalSizes.length).toBeGreaterThan(0);
+  const initialColumns = terminalSizes.at(-1)!.cols;
+  await page.getByLabel("终端字号", { exact: true }).selectOption("18");
+  await expect.poll(() => terminalSizes.at(-1)!.cols).toBeLessThan(initialColumns);
+  await page.getByLabel("终端字号", { exact: true }).selectOption("14");
+  await page.getByRole("button", { name: "搜索终端内容", exact: true }).click();
+  await page.getByRole("textbox", { name: "搜索终端内容", exact: true }).fill("active (running)");
+  await expect(page.getByRole("button", { name: "复制选中内容", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "复制选中内容", exact: true }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "active (running)");
+  await page.getByRole("button", { name: "关闭搜索", exact: true }).click();
+  await page.getByRole("button", { name: "Tab", exact: true }).click();
+  await expect.poll(() => terminalInputs.at(-1)).toBe("\t");
+  await page.getByRole("button", { name: "Ctrl C", exact: true }).click();
+  await expect.poll(() => terminalInputs.at(-1)).toBe("\x03");
+  await page.getByRole("button", { name: "Ctrl 组合键", exact: true }).click();
+  await page.getByRole("textbox", { name: "终端输入", exact: true }).press("d");
+  await expect.poll(() => terminalInputs.at(-1)).toBe("\x04");
+  await expect(page.getByRole("button", { name: "Ctrl 组合键", exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+  // Bracketed paste and application-mode cursor sequences must survive the UI helpers.
+  terminalSocket!.send(Buffer.from("\x1b[?2004h\x1b[?1h"));
+  await page.getByRole("button", { name: "方向上", exact: true }).click();
+  await expect.poll(() => terminalInputs.at(-1)).toBe("\x1bOA");
+  await page.evaluate(() => navigator.clipboard.writeText("中文 pasted\nsecond line"));
+  await page.getByRole("button", { name: "粘贴", exact: true }).click();
+  await expect.poll(() => terminalInputs.at(-1)).toBe("\x1b[200~中文 pasted\rsecond line\x1b[201~");
+  await page.getByRole("button", { name: "新建会话", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "会话 2", exact: true })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await page
+    .locator(".terminal-session:not([hidden])")
+    .getByText("已连接", { exact: true })
+    .waitFor();
+  assert.equal(socketCount, 2);
+  await page.getByRole("tab", { name: "会话 1", exact: true }).click();
+  await expect(page.locator(".terminal-session:not([hidden]) .xterm-rows")).toContainText(
+    "blink-agent.service",
+  );
+  await page.getByRole("button", { name: "关闭会话 2", exact: true }).click();
+  await expect.poll(() => closedSockets).toBe(1);
   await page.getByRole("tab", { name: "监控概览", exact: true }).click();
   await page.getByRole("tab", { name: "网页终端", exact: true }).click();
   await page.getByText("已连接", { exact: true }).waitFor();
-  assert.equal(socketCount, 1, "switching tabs preserves the terminal session");
-  await terminalSocket!.close({ code: 1000 });
+  assert.equal(socketCount, 2, "switching tabs preserves the terminal session");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await shot("terminal-mobile.png");
+  await page.getByRole("button", { name: "打开键盘", exact: true }).click();
+  await expect(page.locator(".terminal-workspace")).toHaveClass(/terminal-expanded/);
+  await expect(page.getByRole("textbox", { name: "终端输入", exact: true })).toBeFocused();
+  await expect
+    .poll(async () => (await page.locator(".terminal-workspace").boundingBox())?.height)
+    .toBe(844);
+  await shot("terminal-mobile-focus.png");
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+  // Model a mobile keyboard shrinking only the visual viewport, as on iOS.
+  await page.evaluate(() => {
+    Object.defineProperty(window.visualViewport, "height", { configurable: true, value: 460 });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect
+    .poll(async () => (await page.locator(".terminal-workspace").boundingBox())?.height)
+    .toBe(460);
+  const keys = await page.getByRole("group", { name: "终端快捷键" }).boundingBox();
+  assert(keys && keys.y + keys.height <= 460, "shortcut keys stay above the virtual keyboard");
+  await expect.poll(() => terminalSizes.at(-1)!.rows).toBeLessThan(10);
+  await shot("terminal-mobile-keyboard.png");
+  await page.evaluate(() => {
+    Reflect.deleteProperty(window.visualViewport!, "height");
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  // Denied clipboard access offers an explicit paste field instead of a dead action.
+  await page.evaluate(() => {
+    navigator.clipboard.readText = () => Promise.reject(new Error("denied"));
+  });
+  await page.getByRole("button", { name: "粘贴", exact: true }).click();
+  await page.getByLabel("粘贴文本", { exact: true }).fill("echo 手机输入");
+  await page.evaluate(() => {
+    Object.defineProperty(window.visualViewport, "height", { configurable: true, value: 460 });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect
+    .poll(async () => (await page.locator(".terminal-workspace").boundingBox())?.height)
+    .toBe(460);
+  const pasteButton = await page
+    .getByRole("button", { name: "粘贴到终端", exact: true })
+    .boundingBox();
+  assert(
+    pasteButton && pasteButton.y + pasteButton.height <= 460,
+    "manual paste stays above the keyboard",
+  );
+  await page.getByRole("button", { name: "粘贴到终端", exact: true }).click();
+  await expect.poll(() => terminalInputs.at(-1)).toBe("\x1b[200~echo 手机输入\x1b[201~");
+  await page.evaluate(() => {
+    Reflect.deleteProperty(window.visualViewport!, "height");
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await page.getByRole("button", { name: "退出专注模式", exact: true }).click();
+  assert.equal(await page.evaluate(() => document.body.style.overflow), "");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await firstTerminalSocket.close({ code: 1000 });
   await page.getByRole("button", { name: "重新连接", exact: true }).click();
   await page.getByText("已连接", { exact: true }).waitFor();
-  assert.equal(socketCount, 2, "explicit reconnect creates one replacement socket");
+  assert.equal(socketCount, 3, "explicit reconnect creates one replacement socket");
+  await page.evaluate(() => window.scrollTo(0, 0));
   await shot("terminal-desktop.png");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await shot("terminal-desktop-dark.png");
+  await page.emulateMedia({ colorScheme: "light" });
   await page.getByRole("button", { name: "关闭会话 1", exact: true }).click();
+  // Coarse-pointer emulation checks the real touch path, not just a narrow desktop viewport.
+  const mobileContext = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+  try {
+    await mobileContext.addCookies([{ name: "blink-dev", value: session, url: origin }]);
+    const mobile = await mobileContext.newPage();
+    const touchInputs: string[] = [];
+    let touchCloses = 0;
+    await mobile.routeWebSocket("**/ws/terminal", (socket) => {
+      socket.onMessage((raw) => {
+        const message = JSON.parse(String(raw));
+        if (message.type === "auth") {
+          socket.send(JSON.stringify({ type: "ready" }));
+          socket.send(Buffer.from("\x1b[32mblink@tokyo\x1b[0m:~$ "));
+        }
+        if (message.type === "input") touchInputs.push(message.data);
+      });
+      socket.onClose(() => {
+        touchCloses++;
+      });
+    });
+    await mobile.goto(`${origin}/servers/${servers[0]}?tab=terminal`);
+    await mobile.getByRole("button", { name: "连接终端", exact: true }).tap();
+    await mobile.getByText("已连接", { exact: true }).waitFor();
+    await expect(mobile.getByRole("textbox", { name: "终端输入" })).not.toBeFocused();
+    await mobile.locator(".terminal-canvas").tap({ position: { x: 100, y: 20 } });
+    await expect(mobile.locator(".terminal-workspace")).toHaveClass(/terminal-expanded/);
+    await mobile.getByRole("button", { name: "Ctrl C", exact: true }).tap();
+    await expect.poll(() => touchInputs.at(-1)).toBe("\x03");
+    await mobile.getByRole("button", { name: "Tab", exact: true }).tap();
+    await expect.poll(() => touchInputs.at(-1)).toBe("\t");
+    await expect(mobile.getByRole("textbox", { name: "终端输入" })).toBeFocused();
+    await mobile.keyboard.insertText("中文🙂");
+    await expect.poll(() => touchInputs.at(-1)).toBe("中文🙂");
+    await mobile.screenshot({
+      path: resolve(dir, "terminal-mobile-touch.png"),
+      animations: "disabled",
+    });
+    await mobile.getByRole("button", { name: "关闭会话 1", exact: true }).tap();
+    await expect.poll(() => touchCloses).toBe(1);
+    await mobile.getByRole("button", { name: "退出专注模式", exact: true }).tap();
+    assert.equal(await mobile.evaluate(() => document.querySelectorAll("[inert]").length), 0);
+  } finally {
+    await mobileContext.close();
+  }
   // If the login itself expires during verification, go to login, not an OTP retry loop.
   await sql`UPDATE sessions SET elevated_until=now()-interval '1 minute' WHERE token_hash=${hash(session)}`;
   await page.getByRole("button", { name: "连接终端", exact: true }).click();

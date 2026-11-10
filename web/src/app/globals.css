@@ -622,18 +622,6 @@ select {
   overflow: auto;
   user-select: text;
 }
-.terminal-surface {
-  padding: 14px;
-  background: #10191b;
-  border-radius: 0 0 8px 8px;
-  min-height: 420px;
-}
-.terminal-surface .xterm {
-  height: 410px;
-}
-.terminal-surface .xterm-viewport {
-  border-radius: 4px;
-}
 .skeleton {
   background: var(--muted);
   border-radius: 6px;
@@ -1212,13 +1200,6 @@ select {
   }
   .chart-box {
     height: 220px;
-  }
-  .terminal-surface {
-    padding: 8px;
-    min-height: 360px;
-  }
-  .terminal-surface .xterm {
-    height: 350px;
   }
   .page-head .row {
     justify-content: flex-end;

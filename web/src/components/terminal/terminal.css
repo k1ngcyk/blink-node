@@ -1,0 +1,487 @@
+.terminal-workspace {
+  --terminal-background: #10191b;
+  --terminal-foreground: #d7e9e6;
+  --terminal-accent: #86d3c1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+.terminal-workspace-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.terminal-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.terminal-identity > svg {
+  color: var(--primary);
+}
+.terminal-identity > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+.terminal-identity small {
+  display: block;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 400;
+}
+.terminal-header-actions,
+.terminal-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.terminal-tabs {
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+  padding: 8px 12px 0;
+  background: var(--muted);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.terminal-tab {
+  display: flex;
+  align-items: center;
+  border-radius: 6px 6px 0 0;
+  color: var(--muted-foreground);
+  border-bottom: 2px solid transparent;
+  flex-shrink: 0;
+}
+.terminal-tab[data-active="true"] {
+  color: var(--primary);
+  background: var(--card);
+  border-bottom-color: var(--primary);
+}
+.terminal-tab > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.terminal-tab > button:last-child {
+  padding: 0;
+  width: 32px;
+}
+.terminal-tab > button:hover {
+  background: var(--accent);
+}
+.terminal-tab > button:focus-visible {
+  outline-offset: -3px;
+}
+.terminal-session-count {
+  margin-left: auto;
+  padding: 10px 4px 8px 16px;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+  font:
+    11px/1.6 "SFMono-Regular",
+    Consolas,
+    monospace;
+}
+.terminal-session {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+}
+.terminal-session[hidden] {
+  display: none;
+}
+.terminal-session-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 6px 12px;
+}
+.terminal-connection {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.terminal-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+}
+.terminal-status-dot[data-state="connected"] {
+  background: var(--success);
+}
+.terminal-status-dot[data-state="error"] {
+  background: var(--destructive);
+}
+.terminal-dimensions {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+  margin-left: 3px;
+}
+.terminal-font-size {
+  height: 32px;
+  font-size: 12px;
+  padding: 0 6px;
+  background: var(--muted);
+  border-color: transparent;
+}
+.terminal-keyboard-toggle {
+  display: none;
+}
+.terminal-surface {
+  background: var(--terminal-background);
+  color: var(--terminal-foreground);
+  padding: 14px 10px 12px 16px;
+  min-height: 0;
+  flex: 1;
+}
+.terminal-canvas {
+  height: clamp(240px, calc(100dvh - 520px), 600px);
+  min-width: 0;
+}
+.terminal-canvas .xterm {
+  height: 100%;
+}
+.terminal-canvas .xterm .xterm-viewport {
+  overscroll-behavior: contain;
+  background: var(--terminal-background);
+}
+.terminal-canvas .xterm-screen {
+  margin: 0;
+}
+.terminal-canvas .xterm-helper-textarea {
+  font-size: 16px;
+}
+.terminal-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--muted);
+}
+.terminal-search > svg {
+  color: var(--muted-foreground);
+  margin-right: 4px;
+}
+.terminal-search input {
+  min-width: 0;
+  height: 34px;
+  font-size: 13px;
+}
+.terminal-search-result {
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  font-size: 11px;
+}
+.terminal-message {
+  padding: 10px 16px;
+  background: var(--muted);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
+.terminal-message[role="alert"] {
+  color: var(--destructive);
+}
+.terminal-paste {
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+  background: var(--muted);
+}
+.terminal-paste textarea {
+  font-size: 16px;
+  max-height: 120px;
+}
+.terminal-keybar {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--muted);
+}
+.terminal-key-group {
+  display: flex;
+  gap: 5px;
+}
+.terminal-keybar[hidden] {
+  display: none;
+}
+.terminal-key-group > button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--card);
+  font:
+    12px/1 "SFMono-Regular",
+    Consolas,
+    monospace;
+  transition:
+    background var(--motion-fast),
+    border-color var(--motion-fast);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.terminal-key-group > button[aria-pressed="true"] {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
+}
+.terminal-key-group > button:not(:disabled):hover {
+  border-color: var(--primary);
+}
+.terminal-key-group > button:not(:disabled):active {
+  background: var(--accent);
+  color: var(--foreground);
+}
+.terminal-key-group > button:disabled {
+  opacity: 0.45;
+}
+.terminal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
+  padding: 5px 14px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  border-top: 1px solid var(--border);
+}
+.terminal-footer > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.terminal-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 56px 24px;
+  text-align: center;
+  min-height: 360px;
+  flex: 1;
+}
+.terminal-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  border-radius: 14px;
+  color: var(--primary);
+  background: var(--accent);
+  margin-bottom: 4px;
+}
+.terminal-empty h2 {
+  font-size: 18px;
+  letter-spacing: -0.025em;
+}
+.terminal-empty p {
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--muted-foreground);
+}
+.terminal-empty small {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  margin-top: 8px;
+}
+.terminal-expanded {
+  position: fixed;
+  inset: var(--terminal-viewport-top, 0px) 0 auto;
+  height: var(--terminal-viewport-height, 100dvh);
+  z-index: 40;
+  border: 0;
+  border-radius: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+}
+.terminal-expanded .terminal-surface {
+  display: flex;
+}
+.terminal-expanded .terminal-canvas {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+}
+.terminal-expanded .terminal-empty {
+  min-height: 0;
+}
+.terminal-spinner {
+  animation: terminal-spin 1s linear infinite;
+}
+@keyframes terminal-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (max-width: 767px) {
+  .terminal-workspace-header {
+    padding: 10px 12px;
+  }
+  .terminal-header-actions > button {
+    min-height: 44px;
+  }
+  .terminal-header-actions > button[data-size="icon"] {
+    width: 44px;
+  }
+  .terminal-tab > button {
+    height: 44px;
+  }
+  .terminal-tab > button:last-child {
+    width: 40px;
+  }
+  .terminal-session-toolbar {
+    padding: 8px 10px;
+    gap: 5px;
+  }
+  .terminal-connection {
+    width: 100%;
+  }
+  .terminal-dimensions {
+    margin-left: auto;
+    border-left: 0;
+  }
+  .terminal-tools {
+    width: 100%;
+    justify-content: space-between;
+    gap: 2px;
+  }
+  .terminal-tools > button {
+    width: 44px;
+    height: 44px;
+  }
+  .terminal-keyboard-toggle {
+    display: inline-flex;
+  }
+  .terminal-font-size {
+    font-size: 16px;
+    height: 40px;
+    width: 78px;
+  }
+  .terminal-surface {
+    padding: 10px 5px 10px 10px;
+  }
+  .terminal-canvas {
+    height: clamp(180px, calc(100dvh - 680px), 330px);
+  }
+  .terminal-search {
+    padding: 6px 8px;
+    gap: 2px;
+  }
+  .terminal-search > svg {
+    display: none;
+  }
+  .terminal-search input {
+    font-size: 16px;
+    height: 44px;
+  }
+  .terminal-search > button {
+    width: 40px;
+    height: 44px;
+  }
+  .terminal-keybar {
+    display: grid;
+    gap: 6px;
+    padding: 8px 10px;
+  }
+  .terminal-key-group {
+    gap: 6px;
+  }
+  .terminal-key-group > button {
+    flex: 1;
+    height: 44px;
+    min-width: 0;
+    font-size: 13px;
+  }
+  .terminal-footer {
+    padding: 6px 10px;
+  }
+  .terminal-footer-hint {
+    display: none;
+  }
+  .terminal-empty {
+    padding: 36px 20px;
+    min-height: 360px;
+  }
+  .terminal-empty small {
+    max-width: 240px;
+  }
+  .terminal-expanded .terminal-workspace-header {
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+  .terminal-expanded .terminal-tabs {
+    padding-top: 0;
+  }
+}
+@media (max-height: 500px) and (orientation: landscape) {
+  .terminal-expanded .terminal-keybar {
+    display: flex;
+    gap: 8px;
+    padding: 4px 10px;
+  }
+  .terminal-expanded .terminal-key-group {
+    flex: 1;
+  }
+  .terminal-expanded .terminal-identity small,
+  .terminal-expanded .terminal-footer {
+    display: none;
+  }
+  .terminal-expanded .terminal-session-toolbar {
+    flex-wrap: nowrap;
+  }
+  .terminal-expanded .terminal-connection {
+    width: auto;
+  }
+  .terminal-expanded .terminal-tools {
+    width: auto;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .terminal-spinner {
+    animation: none;
+  }
+  .terminal-key-group > button {
+    transition: none;
+  }
+}
