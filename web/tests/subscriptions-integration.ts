@@ -732,8 +732,11 @@ try {
       });
     const code = jsQR(new Uint8ClampedArray(pixels.data), pixels.width, pixels.height);
     assert(code, "rendered QR must decode at its displayed size");
-    const match = /^sub:\/\/([^?]+)\?password=([^#]+)#(.*)$/.exec(code.data);
-    assert(match);
+    const match = /^sub:\/\/([A-Za-z0-9+/]+)\?password=([^#]+)#(.*)$/.exec(code.data);
+    assert(
+      match,
+      "QR must match native export: unpadded standard Base64, password query, name fragment",
+    );
     return {
       url: Buffer.from(match[1], "base64").toString("utf8"),
       password: decodeURIComponent(match[2]),
@@ -742,8 +745,8 @@ try {
   };
   const qr = await readQr();
   // Pixel decoding verifies the payload, not Shadowrocket saving its password.
-  // Its 2.2.93 importer drops that field, so the default QR view must be usable
-  // without switching tabs, including when clipboard access is unavailable.
+  // Keep a manual fallback in the default QR view until client-side import is
+  // verified, including when clipboard access is unavailable.
   assert.equal(qr.password, uiPassword);
   assert.equal(qr.name, uiTitle);
   await expect(page.getByText(/扫码可能不会自动填入 Password/)).toBeVisible();

@@ -24,12 +24,12 @@ export type SubscriptionData = {
 };
 export type SubscriptionAccess = { url: string; encryptionPassword: string; displayName: string };
 
-// Shadowrocket's export format includes the password, but its 2.2.93 sub:// importer
-// does not restore that query field. Always offer a separate password copy control.
+// Match Shadowrocket's exported sub:// URI: standard UTF-8 Base64 without trailing
+// '=' padding, followed by the password query and name fragment (both percent-encoded).
 export function shadowrocketSubscriptionUri(access: SubscriptionAccess) {
   const encoded = btoa(
     Array.from(new TextEncoder().encode(access.url), (byte) => String.fromCharCode(byte)).join(""),
-  );
+  ).replace(/=+$/, "");
   return `sub://${encoded}?password=${encodeURIComponent(access.encryptionPassword)}#${encodeURIComponent(access.displayName)}`;
 }
 export const subscriptionProtocols = { reality: "VLESS · REALITY", anytls: "AnyTLS" };

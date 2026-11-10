@@ -180,8 +180,28 @@ test("Shadowrocket share URI carries URL, password and name without putting the 
       encryptionPassword: "0123456789abcdef",
       displayName: "Test",
     }),
-    "sub://aHR0cHM6Ly9leGFtcGxlLmNvbQ==?password=0123456789abcdef#Test",
+    "sub://aHR0cHM6Ly9leGFtcGxlLmNvbQ?password=0123456789abcdef#Test",
   );
+});
+
+test("Shadowrocket share URI matches the client's unpadded standard Base64 export", () => {
+  // Sanitized URLs cover both padding lengths, no padding, and the standard +/ alphabet.
+  // Keep the user's live subscription URL and password out of fixtures.
+  const fixtures = [
+    ["https://example.com", "aHR0cHM6Ly9leGFtcGxlLmNvbQ"],
+    ["https://example.com/", "aHR0cHM6Ly9leGFtcGxlLmNvbS8"],
+    ["https://example.com/a", "aHR0cHM6Ly9leGFtcGxlLmNvbS9h"],
+    ["https://example.com/?a=~", "aHR0cHM6Ly9leGFtcGxlLmNvbS8/YT1+"],
+  ];
+  for (const [url, encoded] of fixtures) {
+    const uri = shadowrocketSubscriptionUri({
+      url,
+      encryptionPassword: "0123456789abcdef",
+      displayName: "Blink Blink",
+    });
+    assert.equal(uri, `sub://${encoded}?password=0123456789abcdef#Blink%20Blink`);
+    assert.equal(Buffer.from(encoded, "base64").toString("utf8"), url);
+  }
 });
 
 test("Shadowrocket payload decrypts to raw UTF-8 URI lines with a fresh prefixed IV", () => {

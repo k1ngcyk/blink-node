@@ -190,7 +190,7 @@ function SubscriptionEditor({
               </Button>
             </div>
             <p className="text-xs muted">
-              所有订阅均加密。扫码导入后，仍需检查并填写 Subscribe → Password。
+              所有订阅均加密。扫码导入后，请检查 Subscribe → Password；未带入时可手动补填。
               {value !== "new" && "更换密码后，请更新客户端的 Password。"}
             </p>
           </fieldset>
@@ -590,7 +590,7 @@ export function Subscriptions() {
           <DialogHeader>
             <DialogTitle>订阅链接</DialogTitle>
             <DialogDescription>
-              {shared?.displayName} · 扫码添加订阅后，请在订阅编辑页填写下方密码。
+              {shared?.displayName} · 扫码添加后请检查 Password，未带入时可复制下方密码。
             </DialogDescription>
           </DialogHeader>
           <Tabs defaultValue="qr">
