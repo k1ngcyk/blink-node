@@ -15,6 +15,7 @@
     "test:integration": "tsx tests/integration.ts",
     "test:load": "tsx tests/load.ts",
     "test:proxy": "tsx tests/proxy-integration.ts",
+    "test:subscriptions": "tsx tests/subscriptions-integration.ts",
     "lint": "eslint .",
     "format": "prettier --write src realtime scripts tests *.ts *.mjs *.json",
     "format:check": "prettier --check src realtime scripts tests *.ts *.mjs *.json",

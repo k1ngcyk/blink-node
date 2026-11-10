@@ -9,6 +9,7 @@ import {
   bigint,
   doublePrecision,
   primaryKey,
+  inet,
 } from "drizzle-orm/pg-core";
 const time = (name: string) => timestamp(name, { withTimezone: true });
 export const users = pgTable("users", {
@@ -39,6 +40,7 @@ export const servers = pgTable("servers", {
   revoked: boolean().notNull().default(false),
   info: jsonb().notNull().default({}),
   lastSeen: time("last_seen"),
+  connectionIp: inet("connection_ip"),
   latest: jsonb(),
   latestAt: time("latest_at"),
   quotaBytes: bigint("quota_bytes", { mode: "number" }),

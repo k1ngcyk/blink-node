@@ -18,6 +18,7 @@ import {
 import { validateTarget } from "./network";
 import { proxyResult, proxyStatus } from "./proxy-model";
 import { importedExitCandidates } from "./proxy-imports";
+import { subscriptionsApi } from "./subscriptions";
 
 type DB = typeof sql | TransactionSql;
 type User = Awaited<ReturnType<typeof owner>>;
@@ -224,6 +225,7 @@ export async function proxyApi(
 ) {
   const method = request.method;
   if (method !== "GET") elevated(user);
+  if (path[1] === "subscriptions") return subscriptionsApi(request, path.slice(2), user);
   if (path[1] === "settings") {
     if (method === "GET") {
       const [s] =

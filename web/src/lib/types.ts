@@ -20,6 +20,8 @@ export type Server = {
   billing_day: number;
   billing_interfaces: string[];
   created_at: string;
+  addresses?: string[];
+  connection_ip?: string | null;
   info: {
     hostname?: string;
     os?: string;
@@ -39,6 +41,13 @@ export type Server = {
     interfaces: { interface: string; rx: number; tx: number }[];
   };
 };
+export function serverAddresses(server: Server) {
+  return server.addresses?.length
+    ? server.addresses
+    : server.connection_ip
+      ? [server.connection_ip]
+      : [];
+}
 export function status(server: Server): "online" | "offline" | "pending" | "revoked" {
   return server.revoked
     ? "revoked"

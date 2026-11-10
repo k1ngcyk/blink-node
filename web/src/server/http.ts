@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isIP } from "node:net";
 import { config } from "./config";
 export class HttpError extends Error {
   constructor(
@@ -18,6 +19,11 @@ export function clientIp(headers: Headers) {
   return config().trustedProxy
     ? (headers.get("x-blink-client-ip") ?? "unknown").slice(0, 64)
     : "local";
+}
+export function connectionIp(value: string | null | undefined) {
+  if (!value) return null;
+  const ip = value.startsWith("::ffff:") ? value.slice(7) : value;
+  return isIP(ip) ? ip : null;
 }
 export async function body<T>(request: Request, schema: z.ZodType<T>, max = 32768): Promise<T> {
   if (!request.headers.get("content-type")?.startsWith("application/json"))

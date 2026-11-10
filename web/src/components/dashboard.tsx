@@ -16,7 +16,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./ui/dialog";
 import { api, useResource } from "@/lib/client";
-import { Server, status } from "@/lib/types";
+import { Server, serverAddresses, status } from "@/lib/types";
 import { bytes, percent } from "@/lib/utils";
 import { ErrorBanner, Loading, Empty, ServerStatus, Meter } from "./common";
 import { agentInstallCommand, agentVersion } from "@/lib/agent-install";
@@ -95,6 +95,8 @@ export function Dashboard() {
     [open, setOpen] = useState(false),
     [enrollment, setEnrollment] = useState<Enrollment | null>(null),
     [saveError, setSaveError] = useState(""),
+    [copiedIp, setCopiedIp] = useState(""),
+    [copyError, setCopyError] = useState(""),
     [saving, setSaving] = useState(false);
   const servers = data ?? [],
     online = servers.filter((s) => status(s) === "online");
@@ -103,7 +105,7 @@ export function Dashboard() {
     (s) =>
       (group === "all" || s.group_name === group) &&
       (filter === "all" || status(s) === filter) &&
-      `${s.name} ${s.group_name} ${s.tags.join(" ")} ${s.info.hostname ?? ""}`
+      `${s.name} ${s.group_name} ${s.tags.join(" ")} ${s.info.hostname ?? ""} ${s.info.os ?? ""} ${serverAddresses(s).join(" ")}`
         .toLowerCase()
         .includes(search.toLowerCase()),
   );
@@ -149,6 +151,7 @@ export function Dashboard() {
         </Button>
       </div>
       <ErrorBanner error={error} retry={refresh} />
+      <ErrorBanner error={copyError} />
       {loading ? (
         <Loading />
       ) : (
@@ -217,7 +220,7 @@ export function Dashboard() {
                   aria-label="搜索服务器"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="搜索名称、标签或主机名"
+                  placeholder="搜索名称、IP、系统或标签"
                 />
               </div>
               <select
@@ -277,6 +280,7 @@ export function Dashboard() {
                     <tr>
                       <th>服务器 / 分组</th>
                       <th>状态</th>
+                      <th>IP 地址</th>
                       <th>CPU</th>
                       <th>内存</th>
                       <th>网络 ↓ / ↑</th>
@@ -301,6 +305,44 @@ export function Dashboard() {
                           <ServerStatus server={s} />
                         </td>
                         <td>
+                          {serverAddresses(s).length ? (
+                            <>
+                              {serverAddresses(s).map((address) => (
+                                <button
+                                  key={address}
+                                  type="button"
+                                  className="row mono text-xs py-1 text-left hover:text-primary"
+                                  aria-label={`复制 ${address}`}
+                                  title={
+                                    copiedIp === `${s.id}:${address}` ? "已复制" : "复制 IP 地址"
+                                  }
+                                  onClick={async () => {
+                                    try {
+                                      await navigator.clipboard.writeText(address);
+                                      setCopiedIp(`${s.id}:${address}`);
+                                      setCopyError("");
+                                    } catch {
+                                      setCopyError("无法访问剪贴板，请手动选择并复制 IP 地址");
+                                    }
+                                  }}
+                                >
+                                  {address}
+                                  {copiedIp === `${s.id}:${address}` ? (
+                                    <IconCheck size={13} />
+                                  ) : (
+                                    <IconCopy size={13} className="muted" />
+                                  )}
+                                </button>
+                              ))}
+                              <span className="subline">
+                                {s.addresses?.length ? "代理节点地址" : "Agent 连接 IP"}
+                              </span>
+                            </>
+                          ) : (
+                            <span className="muted">等待地址上报</span>
+                          )}
+                        </td>
+                        <td>
                           <Meter value={status(s) === "online" ? s.latest?.cpu : null} />
                         </td>
                         <td>
@@ -315,8 +357,11 @@ export function Dashboard() {
                           </div>
                         </td>
                         <td>
-                          <span>{s.info.arch ?? "—"}</span>
+                          <span className="block max-w-56 whitespace-normal">
+                            {s.info.os ?? "等待系统信息"}
+                          </span>
                           <span className="subline">
+                            {s.info.arch ? `${s.info.arch} · ` : ""}
                             {s.info.cpuCount
                               ? `${s.info.cpuCount} 核 · ${bytes(s.latest?.memoryTotal)}`
                               : "等待 Agent 上报"}

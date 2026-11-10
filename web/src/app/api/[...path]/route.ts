@@ -79,7 +79,7 @@ async function handle(request: Request, context: Context) {
     }
     if (route === "servers" && method === "GET") {
       const rows =
-        await sql`SELECT id,name,group_name,tags,notes,revoked,info,last_seen,latest_at,latest-'cores'-'temperatures'-'disks'-'networks' AS latest,quota_bytes,billing_day,billing_interfaces,created_at FROM servers ORDER BY group_name,name`;
+        await sql`SELECT s.id,s.name,s.group_name,s.tags,s.notes,s.revoked,s.info,s.last_seen,s.latest_at,s.latest-'cores'-'temperatures'-'disks'-'networks' AS latest,s.quota_bytes,s.billing_day,s.billing_interfaces,s.created_at,host(s.connection_ip) AS connection_ip,coalesce(h.addresses,'{}'::text[]) AS addresses FROM servers s LEFT JOIN proxy_hosts h ON h.server_id=s.id ORDER BY s.group_name,s.name`;
       return json(rows);
     }
     if (route === "servers" && method === "POST") {
@@ -99,7 +99,7 @@ async function handle(request: Request, context: Context) {
     if (path[0] === "servers" && path[1]) {
       const id = idSchema.parse(path[1]);
       const [server] =
-        await sql`SELECT id,name,group_name,tags,notes,revoked,info,last_seen,latest_at,latest,quota_bytes,billing_day,billing_interfaces,created_at FROM servers WHERE id=${id}`;
+        await sql`SELECT s.id,s.name,s.group_name,s.tags,s.notes,s.revoked,s.info,s.last_seen,s.latest_at,s.latest,s.quota_bytes,s.billing_day,s.billing_interfaces,s.created_at,host(s.connection_ip) AS connection_ip,coalesce(h.addresses,'{}'::text[]) AS addresses FROM servers s LEFT JOIN proxy_hosts h ON h.server_id=s.id WHERE s.id=${id}`;
       if (!server) throw new HttpError(404, "服务器不存在");
       if (path.length === 2 && method === "GET")
         return json({

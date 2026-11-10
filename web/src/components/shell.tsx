@@ -11,6 +11,7 @@ import {
   IconLogout,
   IconChevronRight,
   IconNetwork,
+  IconRss,
 } from "@tabler/icons-react";
 import { Button } from "./ui/button";
 import { api } from "@/lib/client";
@@ -18,6 +19,7 @@ import { useEffect, useState } from "react";
 const links = [
   { href: "/", label: "服务器", icon: IconServer },
   { href: "/proxies", label: "代理服务", icon: IconNetwork },
+  { href: "/subscriptions", label: "代理订阅", icon: IconRss },
   { href: "/checks", label: "网络检查", icon: IconRadar },
   { href: "/alerts", label: "告警中心", icon: IconBell },
   { href: "/audit", label: "操作审计", icon: IconShieldCheck },

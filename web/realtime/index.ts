@@ -6,7 +6,7 @@ import { sql } from "../src/db";
 import { config } from "../src/server/config";
 import { token, hash } from "../src/server/crypto";
 import { owner, audit, rateLimit } from "../src/server/auth";
-import { body, HttpError, sameOrigin } from "../src/server/http";
+import { body, connectionIp, HttpError, sameOrigin } from "../src/server/http";
 import { agentMessage, checkResultSchema } from "../src/server/protocol";
 import { ingest, aggregate, retention, ensurePartitions } from "../src/server/metrics";
 import { evaluateAlerts, deliverNotifications } from "../src/server/alerts";
@@ -179,7 +179,7 @@ server.on("upgrade", (req, socket, head) => {
         clearTimeout(timer);
         track(ws);
         if (terminal) attachTerminalAgent(ws, terminal);
-        else attachAgent(ws, a.id, a.tokenHash);
+        else attachAgent(ws, a.id, a.tokenHash, ip);
       });
     } else if (path === "/ws/live" || path === "/ws/terminal") {
       sameOrigin(h);
@@ -211,7 +211,7 @@ function track(ws: WebSocket) {
   ws.on("error", () => {});
   ws.on("close", () => liveness.delete(ws));
 }
-function attachAgent(ws: WebSocket, id: string, tokenHash: string) {
+function attachAgent(ws: WebSocket, id: string, tokenHash: string, ip: string | null | undefined) {
   agents.get(id)?.ws.close(1000, "Replaced by new connection");
   const a: Agent = { ws, tokenHash, hello: false, pending: 0 };
   agents.set(id, a);
@@ -246,7 +246,7 @@ function attachAgent(ws: WebSocket, id: string, tokenHash: string) {
           if (a.hello) throw new Error("Duplicate hello");
           a.hello = true;
           clearTimeout(helloTimer);
-          await sql`UPDATE servers SET info=${sql.json(m.info)},last_seen=now() WHERE id=${id}`;
+          await sql`UPDATE servers SET info=${sql.json(m.info)},last_seen=now(),connection_ip=coalesce(${connectionIp(ip)}::inet,connection_ip) WHERE id=${id}`;
           send(ws, { v: 1, type: "welcome", intervalSeconds: 5 });
           if (m.info.proxy) await initialProxyScan(id);
           broadcast();

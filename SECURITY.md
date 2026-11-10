@@ -54,9 +54,16 @@ TOTP 与渠道秘密由独立 256-bit AES-GCM 密钥加密。数据库备份与�
 终端流令牌仅存在于网关内存和受 TLS 保护的控制消息，所有连接日志不输出凭证、URL query、输入或输出。
 审计保留身份验证事件、配置修改、终端生命周期与任务类型。
 
+代理订阅由 owner 管理，创建、修改、查看链接及重置链接沿用近期高权限验证。
+客户端通过 `/sub/<token>` 获取订阅，不使用管理员会话；每个订阅有独立的 256-bit 随机令牌，
+SHA-256 摘要用于查询，AES-GCM 密文用于管理员再次复制。响应禁用缓存并按客户端 IP 限流，
+仅输出所选 REALITY / AnyTLS 入口的客户端连接字段，绝不输出 REALITY 私钥。审计不保存令牌或节点密码。
+重置、停用、删除订阅会阻止原链接继续下载，不会撤销客户端已经获得的代理实例凭证。
+
 ## 回归验证
 
 `web/tests/security.test.ts`：密码、TOTP 标准向量、AES-GCM 篡改、网络目标、CSRF、大小限制与告警状态机。
 `web/tests/integration.ts`：真实数据库 + Master + Rust Agent，覆盖 owner 授权、Origin、TOTP 重放、单次注册、
 终端票据重放、PTY / Ctrl+C / 尺寸、诊断、数据去重、聚合、重新验证、重连与撤销。
 `agent` 单元测试独立验证本地 TLS 配置、IP 过滤、计数器回绕与指标序列化。
+`web/tests/subscriptions.test.ts` 和 `web/tests/subscriptions-integration.ts`：URI 编码、私钥隔离、订阅管理授权、令牌轮换 / 停用 / 删除、不可用节点、Agent 来源 IP 与浏览器保存流程。

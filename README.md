@@ -15,6 +15,7 @@
 - Agent 定时自动更新、双重 SHA256 校验、同版本构建识别、连接健康检查与失败回滚。
 
 - 代理管理：Xray REALITY/Vision、sing-box AnyTLS / SS2022、服务端两跳分流、Cloudflare A/AAAA、节点 HTTP-01 证书、UFW 与已有配置扫描。
+- 服务器列表展示 IPv4 / IPv6、系统版本和架构；代理订阅可勾选 REALITY / AnyTLS 入口，供 Shadowrocket 等客户端持续更新。
 
 ## 结构
 
@@ -239,6 +240,18 @@ ICMP 依赖系统 `ping` 命令与允许的 ping socket 权限；必要时为服
 - 构建下载遇到临时网络错误会重试；CI 可回退到现有 Master 的发布镜像，仍须匹配仓库固定的 SHA256。可通过 `BLINK_PROXY_ASSET_MIRROR` 指定 HTTPS 镜像目录。
 - REALITY 客户端已验证 **Xray 26.11.9 + chrome 指纹**。该版服务端要求带 X25519MLKEM768 的较新握手；sing-box 1.14.4 的 REALITY 客户端握手未通过，不能把所有旧客户端视为兼容。AnyTLS 使用 sing-box 客户端验证。
 
+### 代理订阅
+
+在侧栏“代理订阅”创建订阅，按代理实例勾选已部署的 REALITY / AnyTLS 入口，保存后复制订阅 URL。在 Shadowrocket 中新增 **Subscribe** 类型并粘贴 URL；支持标准 URI 列表订阅及相应协议的其他客户端也可使用。
+
+订阅使用 Base64 编码的 `vless://` / `anytls://` 链接列表，连接地址优先使用已保存的公网 IPv4，只有 IPv6 时使用 IPv6；TLS 的 SNI 使用实例域名。服务端两跳出口和分流由入口现有配置执行。SS / SS2022 落地不作为手机直连节点输出。
+
+编辑订阅节点后，客户端更新同一 URL 即可生效；节点的最新名称、IP、端口和认证信息也在更新时读取。停用、吊销、删除、配置尚未应用或缺少连接信息的节点会暂时跳过，管理页展示原因；Agent 暂时离线不会剔除已部署入口。全部节点不可用时返回 HTTP 503，避免客户端用空列表覆盖已有节点。
+
+订阅链接可重复查看、复制或重置；重置、停用、删除后旧链接无法继续拉取。链接含访问凭证，令牌加密保存，输出不包含 REALITY 私钥。停用订阅或重置链接只控制后续下载，已经导入客户端的节点凭证仍由代理实例管理。
+
+服务器列表优先展示代理节点保存的地址；未配置代理地址时展示 Agent 最近连接 IP，并标记来源。连接 IP 是监控连接的来源地址，不一定是 NAT 节点的公网入站地址，不用于生成订阅。存量普通监控节点在 Agent 下次重连后补齐连接 IP。
+
 ### 节点权限与升级
 
 新安装包自动配置 `blink-proxy-manager.service`。部署器以 root 运行，仅通过受限 Unix socket 接受类型化配置任务；代理内核以独立 `blink-proxy` 用户运行，监控 Agent 可继续使用普通用户。
@@ -321,6 +334,7 @@ npm run lint
 npm test
 npm run build
 npx playwright install chromium
+npm run test:subscriptions
 npm run test:integration
 npm run test:load
 bash ../deploy/build-agent.sh
@@ -336,6 +350,7 @@ cargo clippy --all-targets -- -D warnings
 
 集成测试自动生成隔离测试凭证，验证真实 Rust Agent、PTY、权限、补传、浏览器保存流程与双端截图。
 测试完成自动停止自己启动的服务和临时数据库；结果写入忽略版本控制的 `.local/`。
+订阅专项测试使用隔离 PostgreSQL、Next.js 开发服务和网关，验证订阅授权、令牌生命周期、动态节点输出、连接 IP 记录和桌面 / 手机浏览器操作。
 300 节点测试模拟每 5 秒上报，检查 ACK 延迟、持久化样本数和流量一致性。
 Docker 验证会构建真实镜像，使用临时 CA 和回环 HTTPS 端口，检查安全 Cookie、WSS 路由、
 数据库最小权限、非 root Linux Agent、PTY 和子进程清理；结束后删除测试项目自身的容器与卷。
