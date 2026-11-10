@@ -12,6 +12,9 @@ import { Textarea } from "./ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./ui/dialog";
 import { ErrorBanner } from "./common";
 import { useQueryState } from "@/lib/query-state";
+import { ImportedEntranceForm } from "./imported-entrance-form";
+import { subscriptionProtocols } from "@/lib/subscriptions";
+import type { EntranceKind, EntranceSpec } from "@/server/proxy-entrances";
 
 type Instance = {
   id: string;
@@ -49,6 +52,17 @@ type Exit = {
   port: number;
   method: string;
   source: "managed" | "imported";
+  state: string;
+  addresses: string[];
+};
+type Entrance = {
+  id: string;
+  server_id: string;
+  import_id: string;
+  candidate_key: string;
+  name: string;
+  kind: EntranceKind;
+  spec: EntranceSpec;
   state: string;
   addresses: string[];
 };
@@ -97,13 +111,18 @@ const ufwStates: Record<string, string> = {
 export function Proxies({ serverId }: { serverId?: string }) {
   const servers = useResource<Server[]>("servers", 10000),
     instances = useResource<Instance[]>("proxy/instances", 5000),
-    exits = useResource<Exit[]>("proxy/exits", 5000);
+    exits = useResource<Exit[]>("proxy/exits", 5000),
+    entrances = useResource<Entrance[]>("proxy/entrances", 5000);
   const [selected, setSelected] = useQueryState("server");
   const [editing, setEditing] = useState<Instance | "new" | null>(null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
     [detail, setDetail] = useState<{ title: string; value: unknown } | null>(null),
     [importing, setImporting] = useState<Imported | null>(null),
+    [importingEntrance, setImportingEntrance] = useState<{
+      importId: string;
+      candidateKey?: string;
+    } | null>(null),
     [hostDraft, setHostDraft] = useState<{
       id: string;
       addresses: string;
@@ -136,6 +155,7 @@ export function Proxies({ serverId }: { serverId?: string }) {
       void host.refresh();
       void instances.refresh();
       void exits.refresh();
+      void entrances.refresh();
     } catch (error) {
       setError((error as Error).message);
     } finally {
@@ -155,7 +175,11 @@ export function Proxies({ serverId }: { serverId?: string }) {
           </Link>
         </div>
       )}
-      <ErrorBanner error={error || instances.error || exits.error || host.error || servers.error} />
+      <ErrorBanner
+        error={
+          error || instances.error || exits.error || entrances.error || host.error || servers.error
+        }
+      />
       <div className="row between mb-4">
         {!serverId && (
           <select
@@ -486,6 +510,69 @@ export function Proxies({ serverId }: { serverId?: string }) {
         )}
       </section>
       <DeploymentJobs jobs={host.data?.jobs ?? []} />
+      {!!entrances.data?.some((item) => item.server_id === selectedId) && (
+        <section className="panel section-gap">
+          <div className="panel-header">
+            <h2>已添加的已有服务入口</h2>
+            <Link href="/subscriptions" className="muted text-sm">
+              代理订阅
+            </Link>
+          </div>
+          <div className="panel-body">
+            <ul className="plain-list">
+              {entrances.data
+                .filter((item) => item.server_id === selectedId)
+                .map((item) => (
+                  <li className="row between" key={item.id}>
+                    <div>
+                      <strong className="font-medium">{item.name}</strong>
+                      <span className="subline">
+                        {subscriptionProtocols[item.kind]} · {item.spec.port} · SNI：
+                        {item.spec.domain}
+                      </span>
+                      <span
+                        className={
+                          item.state === "active" && item.addresses?.length
+                            ? "subline success"
+                            : "subline error-text"
+                        }
+                      >
+                        {!item.addresses?.length
+                          ? states.missing_address
+                          : item.state === "active"
+                            ? "可在代理订阅中选择"
+                            : states[item.state] || item.state}
+                      </span>
+                    </div>
+                    <div className="row">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy || jobsRunning}
+                        onClick={() =>
+                          setImportingEntrance({
+                            importId: item.import_id,
+                            candidateKey: item.candidate_key,
+                          })
+                        }
+                      >
+                        更新入口引用
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => void act(() => api(`proxy/entrances/${item.id}`, "DELETE"))}
+                      >
+                        移除入口引用
+                      </Button>
+                    </div>
+                  </li>
+                ))}
+            </ul>
+          </div>
+        </section>
+      )}
       {!!exits.data?.some(
         (item) => item.source === "imported" && item.server_id === selectedId,
       ) && (
@@ -538,7 +625,8 @@ export function Proxies({ serverId }: { serverId?: string }) {
         <div className="panel-body">
           <p className="muted text-sm mb-4">
             读取实际启动配置、多文件来源及关联 Web 服务，配置快照加密保存。兼容的 Shadowsocks /
-            SS2022 服务可添加为出口，复用已有连接参数。
+            SS2022 服务可添加为出口；AnyTLS、VLESS（TLS / XTLS /
+            REALITY）可添加为入口并用于代理订阅。
           </p>
           <ul className="plain-list">
             {host.data?.imports.map((item) => (
@@ -570,6 +658,16 @@ export function Proxies({ serverId }: { serverId?: string }) {
                   ))}
                 </div>
                 <div className="row">
+                  {!item.summary.managed && ["xray", "sing-box"].includes(item.summary.engine) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy || jobsRunning}
+                      onClick={() => setImportingEntrance({ importId: item.id })}
+                    >
+                      添加为入口
+                    </Button>
+                  )}
                   {!item.summary.managed &&
                     ["xray", "sing-box", "mihomo"].includes(item.summary.engine) && (
                       <Button
@@ -654,6 +752,33 @@ export function Proxies({ serverId }: { serverId?: string }) {
               onSaved={() => {
                 setImporting(null);
                 void exits.refresh();
+              }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={!!importingEntrance}
+        onOpenChange={(open) => {
+          if (!open) setImportingEntrance(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>将已有代理添加为入口</DialogTitle>
+            <DialogDescription>
+              复用扫描到的用户凭证和连接参数，添加后可在代理订阅中选择。
+            </DialogDescription>
+          </DialogHeader>
+          {importingEntrance && (
+            <ImportedEntranceForm
+              key={`${importingEntrance.importId}:${importingEntrance.candidateKey ?? ""}`}
+              {...importingEntrance}
+              serverName={server?.name ?? "已有代理"}
+              hasAddress={!!host.data?.addresses.length}
+              onSaved={() => {
+                setImportingEntrance(null);
+                void entrances.refresh();
               }}
             />
           )}

@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 import { z } from "zod";
 import { isPublicAddress } from "./network";
 import type { ProxySpec } from "./proxy-model";
+import type { EntranceClient } from "./proxy-entrances";
 
 const displayName = z
   .string()
@@ -47,7 +48,8 @@ export type SubscriptionInstance = {
   name: string;
   server_name: string;
   kind: string;
-  spec: ProxySpec;
+  spec: Pick<ProxySpec, "enabled" | "domain" | "port"> & { client?: EntranceClient };
+  source?: "managed" | "imported";
   state: string;
   revoked: boolean;
   addresses: string[];
@@ -56,12 +58,15 @@ export type SubscriptionInstance = {
 };
 
 export function subscriptionReason(node: SubscriptionInstance) {
-  if (node.kind !== "reality" && node.kind !== "anytls") return "仅支持 REALITY / AnyTLS 入口";
+  if (!["reality", "anytls", "vless"].includes(node.kind))
+    return "仅支持 REALITY / AnyTLS / VLESS 入口";
   if (node.revoked) return "服务器已吊销";
   if (!node.spec.enabled || node.state === "disabled") return "入口已停用";
   if (node.state === "deleting") return "入口正在删除";
+  if (node.state === "stale") return "已有入口配置已变化，请刷新扫描并更新入口引用";
   if (node.state !== "active") return node.state === "failed" ? "入口部署失败" : "入口正在部署";
-  if (node.desired_version !== node.applied_version) return "节点配置尚未应用";
+  if (node.source !== "imported" && node.desired_version !== node.applied_version)
+    return "节点配置尚未应用";
   if (!subscriptionAddress(node.addresses)) return "缺少公网 IP";
   if (
     !node.spec.domain ||
@@ -76,8 +81,9 @@ export function subscriptionReason(node: SubscriptionInstance) {
 const realityCredentials = z.object({
   uuid: z.uuid(),
   publicKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-  shortId: z.string().regex(/^(?:[0-9a-fA-F]{2}){1,8}$/),
+  shortId: z.string().regex(/^(?:[0-9a-fA-F]{2}){0,8}$/),
 });
+const vlessCredentials = z.object({ uuid: z.uuid() });
 const anytlsCredentials = z.object({ password: z.string().min(1).max(4096) });
 
 // Serialize only client fields: never include the REALITY private key or server routing rules.
@@ -90,24 +96,32 @@ export function subscriptionUri(
   const address = subscriptionAddress(node.addresses)!;
   const endpoint = `${isIP(address) === 6 ? `[${address}]` : address}:${node.spec.port}`;
   const label = encodeURIComponent(displayName || `${node.server_name} · ${node.name}`);
-  if (node.kind === "reality") {
-    const parsed = realityCredentials.safeParse(credentials);
+  if (node.kind === "reality" || node.kind === "vless") {
+    const parsed = (node.kind === "reality" ? realityCredentials : vlessCredentials).safeParse(
+      credentials,
+    );
     if (!parsed.success) return null;
-    const { uuid, publicKey, shortId } = parsed.data;
+    const { uuid } = parsed.data;
     const query = new URLSearchParams({
       encryption: "none",
-      security: "reality",
+      security: node.spec.client?.security ?? (node.kind === "reality" ? "reality" : "tls"),
       type: "tcp",
-      flow: "xtls-rprx-vision",
       sni: node.spec.domain,
       fp: "chrome",
-      pbk: publicKey,
-      sid: shortId,
     });
+    const flow = node.spec.client?.flow ?? (node.kind === "reality" ? "xtls-rprx-vision" : "");
+    if (flow) query.set("flow", flow);
+    if (node.kind === "reality") {
+      const { publicKey, shortId } = realityCredentials.parse(credentials);
+      query.set("pbk", publicKey);
+      query.set("sid", shortId);
+    }
+    if (node.spec.client?.alpn.length) query.set("alpn", node.spec.client.alpn.join(","));
     return `vless://${uuid}@${endpoint}?${query}#${label}`;
   }
   const parsed = anytlsCredentials.safeParse(credentials);
   if (!parsed.success) return null;
   const query = new URLSearchParams({ sni: node.spec.domain, insecure: "0" });
+  if (node.spec.client?.alpn.length) query.set("alpn", node.spec.client.alpn.join(","));
   return `anytls://${encodeURIComponent(parsed.data.password)}@${endpoint}/?${query}#${label}`;
 }

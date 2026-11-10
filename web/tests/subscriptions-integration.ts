@@ -1004,6 +1004,120 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await shot("login-mobile.png");
   await sql`UPDATE sessions SET expires_at=now()+interval '1 hour',elevated_until=now()+interval '10 minutes' WHERE token_hash=${hash(session)}`;
+  // Import a real scanned shape through the UI, then select it in an encrypted subscription.
+  await context.addCookies([{ name: "blink-dev", value: session, url: origin }]);
+  await sql`UPDATE servers SET info=info || '{"proxy":true}'::jsonb,last_seen=now() WHERE id=${servers[0]}`;
+  const uiImport = randomUUID();
+  const uiEntranceSecret = "existing-anytls-password:@#";
+  const uiImportSummary = {
+    engine: "sing-box",
+    unit: "existing-anytls.service",
+    active: true,
+    managed: false,
+    paths: ["/etc/sing-box/config.json"],
+    warnings: [],
+    inbounds: [{ protocol: "anytls", port: 10443, reality: false }],
+  };
+  const uiImportConfig = {
+    effective: {
+      inbounds: [
+        {
+          type: "anytls",
+          tag: "Existing AnyTLS",
+          listen: "::",
+          listen_port: 10443,
+          tls: { enabled: true },
+          users: [{ name: "mobile", password: uiEntranceSecret }],
+        },
+      ],
+    },
+  };
+  await sql`INSERT INTO proxy_imports(id,server_id,source_key,summary,encrypted_snapshot) VALUES(${uiImport},${servers[0]},'existing-anytls.service',${sql.json(uiImportSummary)},${encrypt(JSON.stringify(uiImportConfig))})`;
+  assert.equal(
+    (
+      await call(`proxy/imports/${uiImport}/entrances`, "GET", undefined, {
+        session: memberSession,
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await call(
+        `proxy/imports/${uiImport}/entrances`,
+        "POST",
+        { candidateKey: "0:0", name: "no access", domain: "existing.example.com" },
+        { session: memberSession },
+      )
+    ).status,
+    403,
+  );
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${origin}/proxies?server=${servers[0]}`);
+  await page.getByRole("button", { name: "添加为入口", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("已有入口服务 / 用户", { exact: true })).toHaveValue("0:0");
+  await dialog.getByLabel("入口名称", { exact: true }).fill("扫描导入 AnyTLS");
+  await dialog
+    .getByLabel("TLS / REALITY 域名（SNI）", { exact: true })
+    .fill("existing.example.com");
+  await shot("import-entrance-desktop.png");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await shot("import-entrance-mobile.png");
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+  await dialog.getByRole("button", { name: "确认添加入口", exact: true }).click();
+  await page.getByRole("heading", { name: "已添加的已有服务入口", exact: true }).waitFor();
+  await page.getByText("扫描导入 AnyTLS", { exact: true }).waitFor();
+  await shot("imported-entrances-mobile.png");
+  const [uiEntrance] =
+    await sql`SELECT * FROM proxy_external_entrances WHERE import_id=${uiImport}`;
+  assert.equal(uiEntrance.spec.domain, "existing.example.com");
+  assert.equal(uiEntrance.spec.port, 10443);
+  assert(!uiEntrance.encrypted_credentials.includes(uiEntranceSecret));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByRole("button", { name: "更新入口引用", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("入口名称", { exact: true })).toHaveValue("扫描导入 AnyTLS");
+  await expect(dialog.getByLabel("TLS / REALITY 域名（SNI）", { exact: true })).toHaveValue(
+    "existing.example.com",
+  );
+  await dialog.getByLabel("入口名称", { exact: true }).fill("已有 AnyTLS 手机入口");
+  await dialog.getByRole("button", { name: "更新入口引用", exact: true }).click();
+  await page.getByText("已有 AnyTLS 手机入口", { exact: true }).waitFor();
+  await shot("imported-entrances-desktop.png");
+  await page.goto(`${origin}/subscriptions`);
+  await page.getByRole("button", { name: "创建订阅", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  await dialog.getByLabel("订阅名称", { exact: true }).fill("已有入口订阅");
+  await dialog.getByRole("checkbox", { name: /已有 AnyTLS 手机入口/ }).check();
+  await dialog
+    .getByLabel("已有 AnyTLS 手机入口 的客户端显示名称", { exact: true })
+    .fill("已有入口别名");
+  await dialog.getByRole("button", { name: "生成随机密码" }).click();
+  const uiImportedPassword = await dialog.getByLabel("加密密码", { exact: true }).inputValue();
+  await dialog.getByRole("button", { name: "创建订阅", exact: true }).click();
+  await page.getByRole("heading", { name: "订阅链接", exact: true }).waitFor();
+  const [uiImportedSub] = await sql`SELECT id FROM proxy_subscriptions WHERE name='已有入口订阅'`;
+  const importedAccess = await ok(`${base}/${uiImportedSub.id}/link`, "POST", {});
+  const importedUri = new URL(
+    await decryptSubscription(await fetch(importedAccess.url), uiImportedPassword),
+  );
+  assert.equal(decodeURIComponent(importedUri.username), uiEntranceSecret);
+  assert.equal(importedUri.searchParams.get("sni"), "existing.example.com");
+  assert.equal(importedUri.port, "10443");
+  assert.equal(decodeURIComponent(importedUri.hash.slice(1)), "已有入口别名");
+  await page.goto(`${origin}/proxies?server=${servers[0]}`);
+  await page.getByRole("button", { name: "移除入口引用", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "已添加的已有服务入口", exact: true }),
+  ).toHaveCount(0);
+  assert.equal((await fetch(importedAccess.url)).status, 503);
+  const removedImportedNode = (await ok(base)).subscriptions.find(
+    (item: { id: string }) => item.id === uiImportedSub.id,
+  ).nodes[0];
+  assert.equal(removedImportedNode.instanceId, null);
+  assert.equal(removedImportedNode.displayName, "已有入口别名");
+  await ok(`${base}/${uiImportedSub.id}`, "DELETE");
   assert.deepEqual(errors, [], "browser must not report uncaught application errors");
 
   // Dynamic export must reflect updates and deletion without regenerating the URL.

@@ -84,7 +84,7 @@ function SubscriptionEditor({
         <DialogHeader>
           <DialogTitle>{value === "new" ? "创建订阅" : "编辑订阅"}</DialogTitle>
           <DialogDescription>
-            选择 REALITY / AnyTLS 入口，客户端更新订阅时自动获取最新连接配置。
+            选择 REALITY / AnyTLS / VLESS 入口，支持面板部署和已有服务导入。
           </DialogDescription>
         </DialogHeader>
         <form
@@ -256,7 +256,8 @@ function SubscriptionEditor({
                         {node.name} <span className="muted font-normal">· {node.serverName}</span>
                       </span>
                       <span className="block text-xs muted font-normal break-all mt-1">
-                        {node.kind && subscriptionProtocols[node.kind]} ·{" "}
+                        {node.kind && subscriptionProtocols[node.kind]}
+                        {node.source === "imported" ? " · 已有服务" : ""} ·{" "}
                         {node.address
                           ? `${node.address.includes(":") ? `[${node.address}]` : node.address}:${node.port}`
                           : "缺少公网 IP"}
@@ -297,7 +298,7 @@ function SubscriptionEditor({
                       <Link href="/proxies" className="text-primary underline">
                         代理服务
                       </Link>
-                      安装 REALITY 或 AnyTLS。
+                      安装 REALITY / AnyTLS，或将扫描到的已有服务添加为入口。
                     </>
                   )}
                 </p>

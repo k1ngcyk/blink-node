@@ -18,6 +18,7 @@ import {
 import { validateTarget } from "./network";
 import { proxyResult, proxyStatus } from "./proxy-model";
 import { importedExitCandidates } from "./proxy-imports";
+import { importedEntranceCandidates, type EntranceSpec } from "./proxy-entrances";
 import { subscriptionsApi } from "./subscriptions";
 
 type DB = typeof sql | TransactionSql;
@@ -41,6 +42,14 @@ type ExternalExit = {
   encrypted_credentials: string;
   fingerprint: string;
   state: string;
+};
+type ExternalEntrance = {
+  id: string;
+  server_id: string;
+  import_id: string;
+  candidate_key: string;
+  spec: EntranceSpec;
+  fingerprint: string;
 };
 const uuid = z.uuid();
 const settingsInput = z.object({
@@ -260,6 +269,17 @@ export async function proxyApi(
     return json(
       await sql`SELECT p.id,p.server_id,p.name,p.kind,p.spec,p.state,p.error,p.updated_at,s.name AS server_name FROM proxy_instances p JOIN servers s ON s.id=p.server_id ORDER BY p.created_at`,
     );
+  if (path[1] === "entrances" && path.length === 2 && method === "GET")
+    return json(
+      await sql`SELECT e.id,e.server_id,e.import_id,e.candidate_key,e.name,e.kind,e.spec,e.state,s.name AS server_name,h.addresses FROM proxy_external_entrances e JOIN servers s ON s.id=e.server_id LEFT JOIN proxy_hosts h ON h.server_id=s.id WHERE NOT s.revoked ORDER BY e.created_at`,
+    );
+  if (path[1] === "entrances" && path.length === 3 && method === "DELETE") {
+    const id = uuid.parse(path[2]);
+    const removed = await sql`DELETE FROM proxy_external_entrances WHERE id=${id} RETURNING id`;
+    if (!removed.length) throw new HttpError(404, "入口引用不存在");
+    await audit(user.id, "proxy.entrance.removed", id);
+    return json({ ok: true });
+  }
   if (path[1] === "exits" && path.length === 2 && method === "GET") {
     const managed =
       await sql`SELECT p.id,p.server_id,p.name,p.state,s.name AS server_name,p.spec->>'port' AS port,h.addresses FROM proxy_instances p JOIN servers s ON s.id=p.server_id LEFT JOIN proxy_hosts h ON h.server_id=s.id WHERE p.kind='shadowsocks2022' AND p.spec->>'enabled'='true' AND p.state<>'deleting' AND NOT s.revoked ORDER BY p.created_at`;
@@ -551,6 +571,80 @@ export async function proxyApi(
     await audit(user.id, method === "DELETE" ? "proxy.deleted" : "proxy.configured", id);
     return json({ id }, 202);
   }
+  if (path[1] === "imports" && path[2] && path[3] === "entrances" && path.length === 4) {
+    const importId = uuid.parse(path[2]);
+    if (method === "GET") {
+      const [item] = await sql`SELECT * FROM proxy_imports WHERE id=${importId}`;
+      if (!item) throw new HttpError(404, "导入记录不存在");
+      const existing =
+        await sql`SELECT id,candidate_key,name,spec,state FROM proxy_external_entrances WHERE import_id=${importId}`;
+      return json(
+        importedEntranceCandidates(
+          item.summary.engine,
+          JSON.parse(decrypt(item.encrypted_snapshot)),
+        ).map((candidate) => ({
+          key: candidate.key,
+          label: candidate.label,
+          kind: candidate.kind,
+          port: candidate.port,
+          domain: candidate.domain,
+          domains: candidate.domains,
+          flow: candidate.client.flow,
+          reason: item.summary.managed
+            ? "面板管理的服务已直接提供入口选项"
+            : !item.summary.active
+              ? "服务未运行，请启动后刷新节点扫描"
+              : candidate.reason,
+          existing: existing.find((entrance) => entrance.candidate_key === candidate.key) ?? null,
+        })),
+      );
+    }
+    if (method === "POST") {
+      const input = await body(
+        request,
+        z
+          .object({
+            candidateKey: z.string().regex(/^\d+:(?:-1|\d+)$/),
+            name: z.string().trim().min(1).max(100),
+            domain: hostname,
+          })
+          .strict(),
+      );
+      const id = await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(741829005)`;
+        const [item] = await tx`SELECT * FROM proxy_imports WHERE id=${importId}`;
+        if (!item) throw new HttpError(404, "导入记录不存在");
+        await available(tx, item.server_id);
+        await idle(tx, [item.server_id]);
+        if (item.summary.managed || !item.summary.active)
+          throw new HttpError(409, "请选择扫描到的运行中外部服务");
+        const [host] =
+          await tx`SELECT addresses FROM proxy_hosts WHERE server_id=${item.server_id}`;
+        if (!host?.addresses.length) throw new HttpError(400, "先保存入口节点的公网 IP");
+        const candidate = importedEntranceCandidates(
+          item.summary.engine,
+          JSON.parse(decrypt(item.encrypted_snapshot)),
+        ).find((candidate) => candidate.key === input.candidateKey);
+        if (!candidate || candidate.reason)
+          throw new HttpError(400, candidate?.reason || "扫描配置中没有此入口");
+        if (candidate.domains.length && !candidate.domains.includes(input.domain))
+          throw new HttpError(400, "SNI 必须使用此 REALITY 入站配置允许的域名");
+        const spec: EntranceSpec = {
+          enabled: true,
+          port: candidate.port,
+          domain: input.domain,
+          client: candidate.client,
+        };
+        const [entrance] =
+          await tx`INSERT INTO proxy_external_entrances(server_id,import_id,candidate_key,name,kind,spec,encrypted_credentials,fingerprint)
+          VALUES(${item.server_id},${importId},${candidate.key},${input.name},${candidate.kind},${tx.json(spec)},${encrypt(JSON.stringify(candidate.credentials))},${candidate.fingerprint})
+          ON CONFLICT(import_id,candidate_key) DO UPDATE SET name=excluded.name,kind=excluded.kind,spec=excluded.spec,encrypted_credentials=excluded.encrypted_credentials,fingerprint=excluded.fingerprint,state='active' RETURNING id`;
+        return entrance.id;
+      });
+      await audit(user.id, "proxy.entrance.imported", id);
+      return json({ id });
+    }
+  }
   if (path[1] === "imports" && path[2] && path[3] === "exits") {
     const importId = uuid.parse(path[2]);
     if (method === "GET") {
@@ -706,6 +800,24 @@ export async function receiveProxyResult(serverId: string, message: z.infer<type
             ? "active"
             : "stale";
         await tx`UPDATE proxy_external_exits SET state=${state} WHERE id=${exit.id}`;
+      }
+      const entrances = await tx<
+        ExternalEntrance[]
+      >`SELECT * FROM proxy_external_entrances WHERE server_id=${serverId}`;
+      for (const entrance of entrances) {
+        const item = imports.find((item) => item.id === entrance.import_id);
+        const candidate =
+          item?.summary.active && !item.summary.managed
+            ? importedEntranceCandidates(
+                item.summary.engine,
+                JSON.parse(decrypt(item.encrypted_snapshot)),
+              ).find((candidate) => candidate.key === entrance.candidate_key)
+            : undefined;
+        const state =
+          candidate && !candidate.reason && candidate.fingerprint === entrance.fingerprint
+            ? "active"
+            : "stale";
+        await tx`UPDATE proxy_external_entrances SET state=${state} WHERE id=${entrance.id}`;
       }
     }
     if (job.operation === "apply") {

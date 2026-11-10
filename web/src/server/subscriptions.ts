@@ -23,11 +23,15 @@ type StoredNode = SubscriptionInstance & { encrypted_credentials: string };
 
 async function loadNodes(db: DB, ids?: string[], displayNames?: Map<string, string | null>) {
   const rows = await db<StoredNode[]>`
-    SELECT p.id,p.name,p.kind,p.spec,p.state,p.encrypted_credentials,s.name AS server_name,
+    SELECT p.id,p.name,p.kind,p.spec,p.state,p.encrypted_credentials,p.source,s.name AS server_name,
       s.revoked,coalesce(h.addresses,'{}'::text[]) AS addresses,h.desired_version,h.applied_version
-    FROM proxy_instances p JOIN servers s ON s.id=p.server_id
+    FROM (
+      SELECT id,name,kind,spec,state,encrypted_credentials,server_id,created_at,'managed' AS source FROM proxy_instances WHERE kind IN ('reality','anytls')
+      UNION ALL
+      SELECT id,name,kind,spec,state,encrypted_credentials,server_id,created_at,'imported' AS source FROM proxy_external_entrances
+    ) p JOIN servers s ON s.id=p.server_id
     LEFT JOIN proxy_hosts h ON h.server_id=s.id
-    WHERE p.kind IN ('reality','anytls') ${ids ? db`AND p.id IN ${db(ids)}` : db``}
+    ${ids ? db`WHERE p.id IN ${db(ids)}` : db``}
     ORDER BY s.group_name,s.name,p.created_at,p.id`;
   return rows.map((row) => {
     let reason = subscriptionReason(row);
@@ -44,7 +48,8 @@ async function loadNodes(db: DB, ids?: string[], displayNames?: Map<string, stri
       name: row.name,
       displayName: displayNames?.get(row.id) ?? null,
       serverName: row.server_name,
-      kind: row.kind as "reality" | "anytls",
+      kind: row.kind as "reality" | "anytls" | "vless",
+      source: row.source,
       address: subscriptionAddress(row.addresses),
       port: row.spec.port,
       reason,
@@ -54,19 +59,24 @@ async function loadNodes(db: DB, ids?: string[], displayNames?: Map<string, stri
 }
 
 async function replaceNodes(tx: TransactionSql, id: string, ids: string[]) {
-  const nodes = await tx<{ id: string; name: string }[]>`
+  const managed = await tx<{ id: string; name: string }[]>`
     SELECT id,name FROM proxy_instances WHERE id IN ${tx(ids)} AND kind IN ('reality','anytls')
     FOR KEY SHARE`;
-  if (nodes.length !== ids.length) throw new HttpError(400, "请选择仍存在的 REALITY / AnyTLS 入口");
+  const imported = await tx<{ id: string; name: string }[]>`
+    SELECT id,name FROM proxy_external_entrances WHERE id IN ${tx(ids)} FOR KEY SHARE`;
+  const nodes = [...managed, ...imported];
+  if (nodes.length !== ids.length)
+    throw new HttpError(400, "请选择仍存在的 REALITY / AnyTLS / VLESS 入口");
   const previous = await tx<{ instance_id: string | null; display_name: string | null }[]>`
-    SELECT instance_id,display_name FROM proxy_subscription_nodes WHERE subscription_id=${id}`;
+    SELECT coalesce(instance_id,entrance_id) AS instance_id,display_name FROM proxy_subscription_nodes WHERE subscription_id=${id}`;
   const displayNames = new Map(previous.map((node) => [node.instance_id, node.display_name]));
   await tx`DELETE FROM proxy_subscription_nodes WHERE subscription_id=${id}`;
   const names = new Map(nodes.map((node) => [node.id, node.name]));
   await tx`INSERT INTO proxy_subscription_nodes ${tx(
     ids.map((instanceId, position) => ({
       subscription_id: id,
-      instance_id: instanceId,
+      instance_id: managed.some((node) => node.id === instanceId) ? instanceId : null,
+      entrance_id: imported.some((node) => node.id === instanceId) ? instanceId : null,
       name: names.get(instanceId)!,
       display_name: displayNames.get(instanceId) ?? null,
       position,
@@ -87,8 +97,8 @@ async function updateNodeDisplayNames(
   const updated = await tx`
     UPDATE proxy_subscription_nodes AS member SET display_name=names.display_name
     FROM jsonb_to_recordset(${tx.json(entries)}) AS names(instance_id uuid,display_name text)
-    WHERE member.subscription_id=${id} AND member.instance_id=names.instance_id
-    RETURNING member.instance_id`;
+    WHERE member.subscription_id=${id} AND coalesce(member.instance_id,member.entrance_id)=names.instance_id
+    RETURNING coalesce(member.instance_id,member.entrance_id)`;
   if (updated.length !== entries.length)
     throw new HttpError(400, "只能为当前订阅中已选择的节点设置名称");
 }
@@ -104,7 +114,7 @@ export async function subscriptionsApi(request: Request, path: string[], user: U
       const subscriptions =
         await tx`SELECT id,name,display_name,enabled,encrypted_password IS NOT NULL AS encrypted,created_at,updated_at FROM proxy_subscriptions ORDER BY created_at DESC,id`;
       const members =
-        await tx`SELECT subscription_id,instance_id,name,display_name FROM proxy_subscription_nodes ORDER BY subscription_id,position`;
+        await tx`SELECT subscription_id,coalesce(instance_id,entrance_id) AS instance_id,name,display_name FROM proxy_subscription_nodes ORDER BY subscription_id,position`;
       const nodes = (await loadNodes(tx)).map((item) => item.node);
       const byId = new Map(nodes.map((node) => [node.instanceId, node]));
       return {
@@ -221,8 +231,8 @@ export async function subscriptionResponse(request: Request, raw: string) {
       await sql`SELECT id,name,display_name,encrypted_password FROM proxy_subscriptions WHERE token_hash=${hash(raw)} AND enabled`;
     if (!subscription) throw new HttpError(404, "订阅不存在或已停用");
     const members = await sql<{ instance_id: string; display_name: string | null }[]>`
-      SELECT instance_id,display_name FROM proxy_subscription_nodes WHERE subscription_id=${subscription.id}
-      AND instance_id IS NOT NULL ORDER BY position`;
+      SELECT coalesce(instance_id,entrance_id) AS instance_id,display_name FROM proxy_subscription_nodes WHERE subscription_id=${subscription.id}
+      AND (instance_id IS NOT NULL OR entrance_id IS NOT NULL) ORDER BY position`;
     const ids = members.map((m) => m.instance_id);
     const displayNames = new Map(members.map((m) => [m.instance_id, m.display_name]));
     const nodes = ids.length ? await loadNodes(sql, ids, displayNames) : [];

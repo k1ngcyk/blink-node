@@ -3,7 +3,8 @@ export type SubscriptionNode = {
   name: string;
   displayName: string | null;
   serverName: string;
-  kind: "reality" | "anytls" | null;
+  kind: "reality" | "anytls" | "vless" | null;
+  source?: "managed" | "imported";
   address: string | null;
   port: number | null;
   reason: string | null;
@@ -32,4 +33,8 @@ export function shadowrocketSubscriptionUri(access: SubscriptionAccess) {
   ).replace(/=+$/, "");
   return `sub://${encoded}?password=${encodeURIComponent(access.encryptionPassword)}#${encodeURIComponent(access.displayName)}`;
 }
-export const subscriptionProtocols = { reality: "VLESS · REALITY", anytls: "AnyTLS" };
+export const subscriptionProtocols = {
+  reality: "VLESS · REALITY",
+  anytls: "AnyTLS",
+  vless: "VLESS · TLS / XTLS",
+};

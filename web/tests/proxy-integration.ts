@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 
 const exec = promisify(execFile);
 const name = `blink-proxy-db-${randomBytes(5).toString("hex")}`;
@@ -625,6 +625,239 @@ try {
   await drain();
   await api(`exits/${mihomoExit.id}`, "DELETE");
   await drain();
+  const { credentials } = await import("../src/server/proxy-model");
+  const { subscriptionResponse } = await import("../src/server/subscriptions");
+  const importedReality = credentials("reality");
+  const entranceUsers = [
+    { name: "first", password: "external-anytls-password" },
+    { name: "second", password: "other-anytls-password" },
+  ];
+  const entranceSnapshot = {
+    discoveries: [
+      {
+        key: "existing-xray",
+        summary: { engine: "xray", active: true, managed: false },
+        configuration: {
+          effective: {
+            inbounds: [
+              {
+                protocol: "vless",
+                port: 9443,
+                settings: { clients: [{ id: importedReality.uuid, flow: "xtls-rprx-vision" }] },
+                streamSettings: {
+                  network: "tcp",
+                  security: "reality",
+                  realitySettings: {
+                    privateKey: importedReality.privateKey,
+                    shortIds: [""],
+                    serverNames: ["existing.example.com", "other.example.com"],
+                  },
+                },
+              },
+              {
+                protocol: "vless",
+                port: 8443,
+                settings: { clients: [{ id: randomUUID(), flow: "xtls-rprx-vision" }] },
+                streamSettings: { network: "raw", security: "tls", tlsSettings: {} },
+              },
+            ],
+          },
+        },
+      },
+      {
+        key: "existing-sing-box",
+        summary: { engine: "sing-box", active: true, managed: false },
+        configuration: {
+          effective: {
+            inbounds: [
+              {
+                type: "anytls",
+                listen_port: 10443,
+                tls: { enabled: true, server_name: "any.example.com" },
+                users: entranceUsers,
+              },
+            ],
+          },
+        },
+      },
+    ],
+  };
+  async function scanEntrances(value: unknown = entranceSnapshot) {
+    await sql`UPDATE servers SET last_seen=now() WHERE id=${stranger}`;
+    await api(`hosts/${stranger}/scan`, "POST", {});
+    await complete((await dispatch())[0], value as Record<string, unknown>);
+  }
+  await scanEntrances();
+  const entranceImports =
+    await sql`SELECT id,source_key FROM proxy_imports WHERE server_id=${stranger}`;
+  const xrayImport = entranceImports.find((item) => item.source_key === "existing-xray")!.id;
+  const singImport = entranceImports.find((item) => item.source_key === "existing-sing-box")!.id;
+  const entranceCandidates = await api(`imports/${xrayImport}/entrances`);
+  assert.equal(entranceCandidates.length, 2);
+  assert(!JSON.stringify(entranceCandidates).includes(importedReality.privateKey!));
+  assert(!JSON.stringify(entranceCandidates).includes(importedReality.uuid!));
+  assert(
+    !JSON.stringify(await api(`imports/${singImport}/entrances`)).includes(
+      "external-anytls-password",
+    ),
+  );
+  await assert.rejects(
+    api(`imports/${xrayImport}/entrances`, "POST", {
+      candidateKey: "0:0",
+      name: "bad sni",
+      domain: "wrong.example.com",
+    }),
+    /允许的域名/,
+  );
+  await assert.rejects(
+    api(`imports/${xrayImport}/entrances`, "POST", {
+      candidateKey: "9:0",
+      name: "missing",
+      domain: "existing.example.com",
+    }),
+    /没有此入口/,
+  );
+  const externalReality = await api(`imports/${xrayImport}/entrances`, "POST", {
+    candidateKey: "0:0",
+    name: "已有 REALITY",
+    domain: "other.example.com",
+  });
+  const externalVision = await api(`imports/${xrayImport}/entrances`, "POST", {
+    candidateKey: "1:0",
+    name: "已有 XTLS",
+    domain: "tls.example.com",
+  });
+  const externalAny = await api(`imports/${singImport}/entrances`, "POST", {
+    candidateKey: "0:1",
+    name: "已有 AnyTLS",
+    domain: "any.example.com",
+  });
+  assert.equal(
+    (await dispatch()).length,
+    0,
+    "importing entrances never queues deployment or firewall changes",
+  );
+  const [storedEntrance] =
+    await sql`SELECT * FROM proxy_external_entrances WHERE id=${externalReality.id}`;
+  const clientSecret = JSON.parse(decrypt(storedEntrance.encrypted_credentials));
+  assert.equal(clientSecret.publicKey, importedReality.publicKey);
+  assert(!("privateKey" in clientSecret));
+  assert(!storedEntrance.encrypted_credentials.includes(importedReality.uuid!));
+  assert.equal((await sql`SELECT * FROM proxy_instances WHERE server_id=${stranger}`).length, 0);
+  assert.equal((await api("entrances")).length, 3);
+  const entranceSubscriptionPassword = "imported-subscription-password";
+  const importedSub = await api("subscriptions", "POST", {
+    name: "已有入口订阅",
+    encryptionPassword: entranceSubscriptionPassword,
+    nodeIds: [externalAny.id, externalReality.id, externalVision.id],
+    nodeDisplayNames: { [externalReality.id]: "REALITY 别名" },
+  });
+  const rawImportedToken = new URL(importedSub.url).pathname.split("/").at(-1)!;
+  async function exportedEntrances() {
+    const response = await subscriptionResponse(new Request(importedSub.url), rawImportedToken);
+    assert.equal(response.status, 200);
+    const data = Buffer.from(await response.text(), "base64");
+    const decipher = createDecipheriv(
+      "aes-128-cbc",
+      createHash("md5").update(entranceSubscriptionPassword).digest(),
+      data.subarray(0, 16),
+    );
+    return Buffer.concat([decipher.update(data.subarray(16)), decipher.final()])
+      .toString()
+      .split("\n")
+      .map((uri) => new URL(uri));
+  }
+  let exported = await exportedEntrances();
+  assert.equal(decodeURIComponent(exported[0].username), "other-anytls-password");
+  assert.equal(exported[1].searchParams.get("sni"), "other.example.com");
+  assert.equal(exported[1].searchParams.get("sid"), "");
+  assert.equal(exported[1].port, "9443");
+  assert.equal(decodeURIComponent(exported[1].hash.slice(1)), "REALITY 别名");
+  assert.equal(exported[2].searchParams.get("security"), "tls");
+  assert.equal(exported[2].searchParams.get("flow"), "xtls-rprx-vision");
+  await api(`subscriptions/${importedSub.id}`, "PATCH", {
+    nodeIds: [externalVision.id, externalReality.id, externalAny.id],
+  });
+  assert.equal(decodeURIComponent((await exportedEntrances())[1].hash.slice(1)), "REALITY 别名");
+  await api(`subscriptions/${importedSub.id}`, "PATCH", {
+    nodeDisplayNames: { [externalAny.id]: "AnyTLS 别名" },
+  });
+  await scanEntrances();
+  assert((await api("entrances")).every((item: { state: string }) => item.state === "active"));
+  await sql`UPDATE proxy_hosts SET desired_version=99 WHERE server_id=${stranger}`;
+  assert.equal(
+    (await exportedEntrances()).length,
+    3,
+    "unrelated managed versions don't hide existing entrances",
+  );
+  entranceUsers[1].password = "rotated-anytls-password";
+  await scanEntrances();
+  assert.equal(
+    (await api("entrances")).find((item: { id: string }) => item.id === externalAny.id).state,
+    "stale",
+  );
+  assert.equal(
+    (await exportedEntrances()).length,
+    2,
+    "changed credentials are not published until reimported",
+  );
+  const updatedEntrance = await api(`imports/${singImport}/entrances`, "POST", {
+    candidateKey: "0:1",
+    name: "已有 AnyTLS",
+    domain: "any.example.com",
+  });
+  assert.equal(updatedEntrance.id, externalAny.id, "reimport preserves subscription membership");
+  exported = await exportedEntrances();
+  assert.equal(decodeURIComponent(exported[2].username), "rotated-anytls-password");
+  assert.equal(decodeURIComponent(exported[2].hash.slice(1)), "AnyTLS 别名");
+  entranceSnapshot.discoveries[0].summary.active = false;
+  await scanEntrances();
+  assert.equal((await exportedEntrances()).length, 1);
+  await assert.rejects(
+    api(`imports/${xrayImport}/entrances`, "POST", {
+      candidateKey: "0:0",
+      name: "inactive",
+      domain: "existing.example.com",
+    }),
+    /运行中外部服务/,
+  );
+  entranceSnapshot.discoveries[0].summary.active = true;
+  entranceSnapshot.discoveries[0].summary.managed = true;
+  await scanEntrances();
+  assert((await api(`imports/${xrayImport}/entrances`))[0].reason);
+  await assert.rejects(
+    api(`imports/${xrayImport}/entrances`, "POST", {
+      candidateKey: "0:0",
+      name: "managed",
+      domain: "existing.example.com",
+    }),
+    /运行中外部服务/,
+  );
+  entranceSnapshot.discoveries[0].summary.managed = false;
+  await scanEntrances({ discoveries: [] });
+  assert.equal(
+    (await subscriptionResponse(new Request(importedSub.url), rawImportedToken)).status,
+    503,
+  );
+  await api(`entrances/${externalReality.id}`, "DELETE");
+  const importedMembers = (await api("subscriptions")).subscriptions.find(
+    (item: { id: string }) => item.id === importedSub.id,
+  ).nodes;
+  assert.equal(importedMembers[1].instanceId, null);
+  assert.equal(importedMembers[1].displayName, "REALITY 别名");
+  assert.equal(importedMembers[1].reason, "入口已删除");
+  await api(`entrances/${externalVision.id}`, "DELETE");
+  await api(`entrances/${externalAny.id}`, "DELETE");
+  assert.equal((await dispatch()).length, 0, "removing a reference doesn't stop external services");
+  const entranceAudit = JSON.stringify(
+    await sql`SELECT * FROM audit_events WHERE action LIKE 'proxy.entrance.%'`,
+  );
+  for (const value of [
+    importedReality.privateKey!,
+    importedReality.uuid!,
+    "rotated-anytls-password",
+  ])
+    assert(!entranceAudit.includes(value));
   const { ensureDns } = await import("../src/server/cloudflare");
   const nativeFetch = globalThis.fetch;
   const zoneId = "a".repeat(32),
@@ -687,7 +920,7 @@ try {
     globalThis.fetch = nativeFetch;
   }
   console.log(
-    "PASS proxy database/API: migration, auto-scan, encrypted import, cross-agent rejection, dependency ordering, ACL sources, credentials and delete",
+    "PASS proxy database/API: migration, auto-scan, encrypted import, cross-agent rejection, dependency ordering, ACL sources, imported AnyTLS/XTLS/REALITY entrances, subscriptions, drift and delete",
   );
 } finally {
   await close?.();
