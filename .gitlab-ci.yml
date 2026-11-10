@@ -18,7 +18,6 @@ build-and-publish:
     expire_in: 7 days
     paths:
       - web/public/downloads/agent/
-      - .local/docker-*/verification.json
       - .local/publish-metadata.json
 
 deploy-production:

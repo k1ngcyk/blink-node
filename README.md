@@ -354,20 +354,20 @@ GitHub 镜像：`git@github.com:k1ngcyk/blink-node.git`。
 复用 runner 已有的 Docker 和镜像仓库登录。部署阶段使用 Master 上的项目专用 **`blink-master-deploy`** Runner。
 推送 `main` 后自动执行：
 
-- Web 类型检查、lint、安全单测；
-- 构建两种架构的 musl Agent，测试安装、权限和失败回滚；
-- 构建统一运行镜像并验证真实 Compose、HTTPS/WSS、静态下载和 Linux PTY；
-- 全部成功后推送 `:0.1.0`、`:latest` 及完整 Git commit SHA 标签。
+- 构建 AMD64 / ARM64 的 musl Agent 安装包；
+- 构建两种架构的统一运行镜像，推送 `:0.1.0`、`:latest` 及完整 Git commit SHA 标签；
 - Master Runner 拉取该次提交的 SHA 标签，解析并固定镜像 digest，执行迁移，更新 Web / 网关并等待健康检查。
 - 验证 Agent 更新清单可用；部署失败时恢复旧镜像及 `.env`，节点随后通过定时任务获取成功发布的 Agent。
 
-构建 runner 需要 Docker、Buildx、Compose、Python 3 和访问镜像仓库的权限，不需要预装 Node 或 Rust。
+类型检查、lint、单元测试、安装矩阵、代理集成和 Docker 冒烟测试在本地开发时执行，生产 CI 不重复运行。发布日志分别记录 Agent 打包与 Web 镜像构建/推送的耗时。
+
+构建 runner 需要 Docker、Buildx、Python 3 和访问镜像仓库的权限，不需要预装 Node 或 Rust。
 构建使用该项目独立且持久的 BuildKit builder；缺少 ARM64 支持时会注册 QEMU binfmt。
 Rust 编译器始终原生运行，通过 Zig 交叉编译生成两种架构的 musl 二进制，避免在 QEMU 中编译 Rust；
-QEMU 只用于异构产物的运行测试和目标架构镜像步骤。Cargo 编译产物按架构缓存，新提交会取消过时的构建。
+QEMU 用于目标架构镜像步骤；在 AMD64 runner 上构建 ARM64 Web 镜像仍有仿真开销。Cargo 编译产物按架构缓存，新提交会取消过时的构建。
 构建和生产部署各自通过 `resource_group` 串行执行；部署前验证提交仍是 `main` 最新提交，跳过过时流水线。
 生产部署不可被新提交自动取消，防止服务切换途中中断。镜像回滚不撤销已成功的数据库迁移，迁移须保持前向兼容。
-GitLab 产物只保存安装包与验证结果，不上传测试秘密或容器日志。
+GitLab 产物只保存安装包与镜像发布元数据。
 
 #### Master 部署 Runner
 
