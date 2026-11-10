@@ -303,7 +303,9 @@ def core_config(item):
         for exit in item['exits']:
             outbound.append({'tag': exit['id'], 'protocol': 'shadowsocks', 'settings': {
                 'address': exit['address'], 'port': exit['port'], 'method': exit['method'], 'password': exit['password']}})
-        rules = []
+        outbound.append({'tag': 'block-quic', 'protocol': 'blackhole', 'settings': {}})
+        # Reject sniffed QUIC before any user route, including direct exits.
+        rules = [{'type': 'field', 'protocol': ['quic'], 'outboundTag': 'block-quic'}]
         for rule in item['rules']:
             field = 'ip' if rule['match'] == 'ip_cidr' else 'domain'
             values = rule['values'] if field == 'ip' else [('full:' if rule['match'] == 'domain' else 'domain:') + value for value in rule['values']]
@@ -332,7 +334,7 @@ def core_config(item):
     for exit in item['exits']:
         outbound.append({'type': 'shadowsocks', 'tag': exit['id'], 'server': exit['address'],
                          'server_port': exit['port'], 'method': exit['method'], 'password': exit['password']})
-    rules = [{'action': 'sniff'}]
+    rules = [{'action': 'sniff'}, {'protocol': ['quic'], 'action': 'reject'}]
     resolved = False
     for rule in item['rules']:
         if rule['match'] == 'ip_cidr' and not resolved:

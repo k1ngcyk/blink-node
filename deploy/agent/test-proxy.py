@@ -243,8 +243,21 @@ rules: [MATCH,DIRECT]
         item['rules'] = [{'match': 'domain', 'values': ['direct.test'], 'outbound': 'direct'}, {'match': 'ip_cidr', 'values': ['1.1.1.0/24'], 'outbound': 'direct'}]
         item['defaultOutbound'] = 'exit'
         config = m.core_config(item)
-        self.assertEqual(config['routing']['rules'][0]['domain'], ['full:direct.test'])
+        self.assertEqual(config['routing']['rules'][0]['protocol'], ['quic'])
+        blocked = config['routing']['rules'][0]['outboundTag']
+        self.assertEqual(next(outbound for outbound in config['outbounds'] if outbound['tag'] == blocked)['protocol'], 'blackhole')
+        self.assertEqual(config['routing']['rules'][1]['domain'], ['full:direct.test'])
         self.assertEqual(config['routing']['rules'][-1]['outboundTag'], 'exit')
+        for kind in ('anytls', 'shadowsocks2022'):
+            with self.subTest(kind=kind):
+                item.update(kind=kind, credentials={'method': '2022-blake3-aes-256-gcm', 'password': base64.b64encode(secrets.token_bytes(32)).decode()})
+                if kind == 'shadowsocks2022':
+                    item.update(rules=[], defaultOutbound='direct')
+                config = m.core_config(item)
+                self.assertEqual(config['route']['rules'][:2], [{'action': 'sniff'}, {'protocol': ['quic'], 'action': 'reject'}])
+                self.assertEqual(config['route']['final'], item['defaultOutbound'])
+                if kind == 'anytls':
+                    self.assertEqual(config['route']['rules'][2]['domain'], ['direct.test'])
 
     def test_scanner_preserves_json_comments_and_multifile_order(self):
         config = json.loads(m.strip_json_comments('{"url":"https://host/", /*a*/ "inbounds":[] // hi\n}'))
@@ -499,7 +512,7 @@ def integration():
         exit = {'id': ss['id'], 'address': '127.0.0.1', 'port': ss['port'], 'udp': True, **ss['credentials']}
         server_key, user_key = (base64.b64encode(secrets.token_bytes(16)).decode() for _ in range(2))
         imported_exit = {'id': str(uuid.uuid4()), 'address': '127.0.0.1', 'port': 18389, 'udp': True, 'method': '2022-blake3-aes-128-gcm', 'password': server_key + ':' + user_key}
-        reality.update(exits=[exit, imported_exit], defaultOutbound=ss['id'], rules=[{'match': 'domain', 'values': ['imported.test'], 'outbound': imported_exit['id']}, {'match': 'domain', 'values': ['direct.test'], 'outbound': 'direct'}, {'match': 'ip_cidr', 'values': ['127.0.0.2/32'], 'outbound': 'direct'}])
+        reality.update(exits=[exit, imported_exit], defaultOutbound=ss['id'], rules=[{'match': 'domain', 'values': ['imported.test'], 'outbound': imported_exit['id']}, {'match': 'domain', 'values': ['direct.test', 'example.com'], 'outbound': 'direct'}, {'match': 'ip_cidr', 'values': ['127.0.0.2/32'], 'outbound': 'direct'}])
         anytls = copy.deepcopy(reality); anytls.update(id=str(uuid.uuid4()), kind='anytls', port=18444, fallbackPort=8004, domain='any.example.test', credentials={'password': base64.b64encode(secrets.token_bytes(32)).decode()})
         data = {'instances': [reality, anytls], 'addresses': ['8.8.8.8'], 'email': 'test@example.test', 'firewall': 'external'}
         Path('/run/blink-proxy-web').mkdir(exist_ok=True)
@@ -545,6 +558,9 @@ def integration():
                 outbound['tls']['alpn'] = ['h2', 'http/1.1']
             launch('sing-box', {'inbounds': [{'type': 'mixed', 'listen': '127.0.0.1', 'listen_port': port}], 'outbounds': [outbound]}, 'client-' + protocol)
             ready(port)
+        launch('sing-box', {'inbounds': [{'type': 'mixed', 'listen': '127.0.0.1', 'listen_port': 19082}],
+                           'outbounds': [{'type': 'shadowsocks', 'server': '127.0.0.1', 'server_port': ss['port'], **ss['credentials']}]}, 'client-ss')
+        ready(19082)
         def get(port, host):
             return subprocess.run(['curl', '-fsS', '--max-time', '15', '--noproxy', '', '--socks5-hostname', '127.0.0.1:' + str(port), 'http://' + host + ':18080/'], capture_output=True, timeout=18)
         for port in (19080, 19081):
@@ -558,9 +574,11 @@ def integration():
             assert fallback.returncode == 0 and fallback.stdout.splitlines()[0] == b'blink-proxy-ok', fallback.stderr
             assert fallback.stdout.splitlines()[-1] == (b'2' if protocol == '--http2' else b'1.1'), fallback.stdout
         import socketserver
+        udp_received = []
         class Echo(socketserver.BaseRequestHandler):
             def handle(self):
                 data, sock = self.request
+                udp_received.append(data)
                 sock.sendto(data, self.client_address)
         udp = socketserver.UDPServer(('127.0.0.1', 18081), Echo)
         servers.append(udp)
@@ -572,17 +590,70 @@ def integration():
                 assert chunk, 'SOCKS closed early'
                 data += chunk
             return data
-        for port in (19080, 19081):
+        def udp_request(port, payload, timeout=15):
             with socket.create_connection(('127.0.0.1', port), timeout=15) as control, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
-                client.bind(('127.0.0.1', 0)); client.settimeout(15)
+                client.bind(('127.0.0.1', 0)); client.settimeout(timeout)
                 control.sendall(b'\x05\x01\x00'); assert receive(control, 2) == b'\x05\x00'
                 control.sendall(b'\x05\x03\x00\x01\x7f\x00\x00\x01' + m.struct.pack('!H', client.getsockname()[1]))
                 header = receive(control, 4); assert header[:2] == b'\x05\x00'
                 address = receive(control, 4 if header[3] == 1 else 16)
                 relay_port = m.struct.unpack('!H', receive(control, 2))[0]
-                message = b'\x00\x00\x00\x01\x7f\x00\x00\x01' + m.struct.pack('!H', 18081) + b'blink-udp-ok'
+                message = b'\x00\x00\x00\x01\x7f\x00\x00\x01' + m.struct.pack('!H', 18081) + payload
                 client.sendto(message, ('127.0.0.1', relay_port))
-                assert client.recv(4096).endswith(b'blink-udp-ok'), port
+                return client.recv(4096)
+        # RFC 9001, Appendix A.2: encrypted QUIC v1 Client Initial, SNI example.com.
+        # Replay on a non-443 port so client-side Vision UDP/443 filtering cannot
+        # hide a missing server rule. Its SNI also matches the direct user route.
+        quic = bytes.fromhex('''
+            c000000001088394c8f03e5157080000 449e7b9aec34d1b1c98dd7689fb8ec11
+            d242b123dc9bd8bab936b47d92ec356c 0bab7df5976d27cd449f63300099f399
+            1c260ec4c60d17b31f8429157bb35a12 82a643a8d2262cad67500cadb8e7378c
+            8eb7539ec4d4905fed1bee1fc8aafba1 7c750e2c7ace01e6005f80fcb7df6212
+            30c83711b39343fa028cea7f7fb5ff89 eac2308249a02252155e2347b63d58c5
+            457afd84d05dfffdb20392844ae81215 4682e9cf012f9021a6f0be17ddd0c208
+            4dce25ff9b06cde535d0f920a2db1bf3 62c23e596d11a4f5a6cf3948838a3aec
+            4e15daf8500a6ef69ec4e3feb6b1d98e 610ac8b7ec3faf6ad760b7bad1db4ba3
+            485e8a94dc250ae3fdb41ed15fb6a8e5 eba0fc3dd60bc8e30c5c4287e53805db
+            059ae0648db2f64264ed5e39be2e20d8 2df566da8dd5998ccabdae053060ae6c
+            7b4378e846d29f37ed7b4ea9ec5d82e7 961b7f25a9323851f681d582363aa5f8
+            9937f5a67258bf63ad6f1a0b1d96dbd4 faddfcefc5266ba6611722395c906556
+            be52afe3f565636ad1b17d508b73d874 3eeb524be22b3dcbc2c7468d54119c74
+            68449a13d8e3b95811a198f3491de3e7 fe942b330407abf82a4ed7c1b311663a
+            c69890f4157015853d91e923037c227a 33cdd5ec281ca3f79c44546b9d90ca00
+            f064c99e3dd97911d39fe9c5d0b23a22 9a234cb36186c4819e8b9c5927726632
+            291d6a418211cc2962e20fe47feb3edf 330f2c603a9d48c0fcb5699dbfe58964
+            25c5bac4aee82e57a85aaf4e2513e4f0 5796b07ba2ee47d80506f8d2c25e50fd
+            14de71e6c418559302f939b0e1abd576 f279c4b2e0feb85c1f28ff18f58891ff
+            ef132eef2fa09346aee33c28eb130ff2 8f5b766953334113211996d20011a198
+            e3fc433f9f2541010ae17c1bf202580f 6047472fb36857fe843b19f5984009dd
+            c324044e847a4f4a0ab34f719595de37 252d6235365e9b84392b061085349d73
+            203a4a13e96f5432ec0fd4a1ee65accd d5e3904df54c1da510b0ff20dcc0c77f
+            cb2c0e0eb605cb0504db87632cf3d8b4 dae6e705769d1de354270123cb11450e
+            fc60ac47683d7b8d0f811365565fd98c 4c8eb936bcab8d069fc33bd801b03ade
+            a2e1fbc5aa463d08ca19896d2bf59a07 1b851e6c239052172f296bfb5e724047
+            90a2181014f3b94a4e97d117b4381303 68cc39dbb2d198065ae3986547926cd2
+            162f40a29f0c3c8745c0f50fba3852e5 66d44575c29d39a03f0cda721984b6f4
+            40591f355e12d439ff150aab7613499d bd49adabc8676eef023b15b65bfc5ca0
+            6948109f23f350db82123535eb8a7433 bdabcb909271a6ecbcb58b936a88cd4e
+            8f2e6ff5800175f113253d8fa9ca8885 c2f552e657dc603f252e1a8e308f76f0
+            be79e2fb8f5d5fbbe2e30ecadd220723 c8c0aea8078cdfcb3868263ff8f09400
+            54da48781893a7e49ad5aff4af300cd8 04a6b6279ab3ff3afb64491c85194aab
+            760d58a606654f9f4400e8b38591356f bf6425aca26dc85244259ff2b19c41b9
+            f96f3ca9ec1dde434da7d2d392b905dd f3d1f9af93d1af5950bd493f5aa731b4
+            056df31bd267b6b90a079831aaf579be 0a39013137aac6d404f518cfd4684064
+            7e78bfe706ca4cf5e9c5453e9f7cfd2b 8b4c8d169a44e55c88d4a9a7f9474241
+            e221af44860018ab0856972e194cd934
+        ''')
+        for port in (19080, 19081, 19082):
+            assert udp_request(port, b'blink-udp-before').endswith(b'blink-udp-before'), port
+            try:
+                udp_request(port, quic, timeout=2)
+                raise AssertionError('QUIC was forwarded through SOCKS port ' + str(port))
+            except socket.timeout:
+                pass
+            assert quic not in udp_received, ('QUIC reached the target', port)
+            assert udp_request(port, b'blink-udp-after').endswith(b'blink-udp-after'), port
+        print('PASS REALITY, AnyTLS and SS2022 reject QUIC before direct routing, while ordinary UDP still works')
         # Kill the SS hop: direct rules still work, chain traffic must not fail open.
         ss_process.terminate(); ss_process.wait(timeout=5)
         for port in (19080, 19081):
