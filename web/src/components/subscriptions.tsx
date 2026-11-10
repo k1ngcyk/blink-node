@@ -190,8 +190,8 @@ function SubscriptionEditor({
               </Button>
             </div>
             <p className="text-xs muted">
-              所有订阅均加密。保存后可用 Shadowrocket 扫码导入，或手动填写 Subscribe → Password。
-              {value !== "new" && "更换密码后，请重新扫码或更新客户端的 Password。"}
+              所有订阅均加密。扫码导入后，仍需检查并填写 Subscribe → Password。
+              {value !== "new" && "更换密码后，请更新客户端的 Password。"}
             </p>
           </fieldset>
           <fieldset disabled={busy} className="min-w-0">
@@ -569,10 +569,11 @@ export function Subscriptions() {
               await api(`${endpoint}/${editing.id}`, "PATCH", draft);
               setEditing(null);
               setMessage(
-                draft.encryptionPassword ||
-                  (draft.displayName || draft.name) !== (editing.displayName || editing.name)
-                  ? `「${draft.name}」已保存，请重新扫码同步订阅名称与密码`
-                  : `「${draft.name}」已保存，客户端更新订阅后生效`,
+                draft.encryptionPassword
+                  ? `「${draft.name}」已保存，请复制新密码并更新客户端的 Password；名称可在客户端编辑`
+                  : (draft.displayName || draft.name) !== (editing.displayName || editing.name)
+                    ? `「${draft.name}」已保存，请在客户端修改订阅名称，或重新扫码后补填 Password`
+                    : `「${draft.name}」已保存，客户端更新订阅后生效`,
               );
             }
             resource.refresh();
@@ -585,11 +586,11 @@ export function Subscriptions() {
           if (!open) setShared(null);
         }}
       >
-        <DialogContent>
+        <DialogContent className="max-h-[90dvh] overflow-auto">
           <DialogHeader>
             <DialogTitle>订阅链接</DialogTitle>
             <DialogDescription>
-              {shared?.displayName} · 用 Shadowrocket 扫码导入，或手动填写名称、URL 和密码。
+              {shared?.displayName} · 扫码添加订阅后，请在订阅编辑页填写下方密码。
             </DialogDescription>
           </DialogHeader>
           <Tabs defaultValue="qr">
@@ -614,6 +615,9 @@ export function Subscriptions() {
                 />
               )}
               <p className="text-sm text-center">打开 Shadowrocket，点击首页扫一扫。</p>
+              <p className="text-sm text-center">
+                扫码可能不会自动填入 Password，请复制下方密码，在订阅编辑页粘贴、保存后更新订阅。
+              </p>
               <p className="text-xs muted text-center">
                 二维码包含订阅链接和解密密码，仅在本地生成，请勿分享截图。
               </p>
@@ -640,7 +644,6 @@ export function Subscriptions() {
               <p className="muted text-xs">
                 将下方密码填入 Subscribe → Password。链接和密码请分别保管。
               </p>
-              <ErrorBanner error={copyError} />
               <Button
                 className="w-full"
                 onClick={async () => {
@@ -657,47 +660,50 @@ export function Subscriptions() {
                 {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
                 {copied ? "已复制订阅链接" : "复制订阅链接"}
               </Button>
-              {shared?.encryptionPassword && (
-                <>
-                  <label className="field">
-                    订阅加密密码
-                    <Input
-                      type={showSharedPassword ? "text" : "password"}
-                      className="mono text-xs"
-                      value={shared.encryptionPassword}
-                      readOnly
-                      autoComplete="off"
-                      onFocus={(e) => e.target.select()}
-                    />
-                  </label>
-                  <div className="row">
-                    <Button
-                      variant="outline"
-                      onClick={async () => {
-                        try {
-                          await navigator.clipboard.writeText(shared.encryptionPassword);
-                          setPasswordCopied(true);
-                          setCopyError("");
-                        } catch {
-                          setCopyError("无法访问剪贴板，请显示密码后手动选择并复制");
-                        }
-                      }}
-                    >
-                      {passwordCopied ? <IconCheck size={16} /> : <IconCopy size={16} />}
-                      {passwordCopied ? "已复制密码" : "复制密码"}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      aria-pressed={showSharedPassword}
-                      onClick={() => setShowSharedPassword(!showSharedPassword)}
-                    >
-                      {showSharedPassword ? "隐藏密码" : "显示密码"}
-                    </Button>
-                  </div>
-                </>
-              )}
             </TabsContent>
           </Tabs>
+          <ErrorBanner error={copyError} />
+          {shared && (
+            <div className="space-y-3">
+              <label className="field">
+                订阅加密密码
+                <Input
+                  type={showSharedPassword ? "text" : "password"}
+                  className="mono text-xs"
+                  value={shared.encryptionPassword}
+                  readOnly
+                  autoComplete="off"
+                  onFocus={(e) => e.target.select()}
+                />
+              </label>
+              <div className="row">
+                <Button
+                  variant="outline"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(shared.encryptionPassword);
+                      setPasswordCopied(true);
+                      setCopyError("");
+                    } catch {
+                      setPasswordCopied(false);
+                      setCopyError("无法访问剪贴板，请显示密码后手动选择并复制");
+                    }
+                  }}
+                >
+                  {passwordCopied ? <IconCheck size={16} /> : <IconCopy size={16} />}
+                  {passwordCopied ? "已复制密码" : "复制密码"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  aria-pressed={showSharedPassword}
+                  onClick={() => setShowSharedPassword(!showSharedPassword)}
+                >
+                  {showSharedPassword ? "隐藏密码" : "显示密码"}
+                </Button>
+              </div>
+              <p className="text-xs muted">填写位置：Shadowrocket → 编辑此订阅 → Password。</p>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
       <Dialog

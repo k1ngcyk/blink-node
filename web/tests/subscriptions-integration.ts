@@ -741,8 +741,40 @@ try {
     };
   };
   const qr = await readQr();
+  // Pixel decoding verifies the payload, not Shadowrocket saving its password.
+  // Its 2.2.93 importer drops that field, so the default QR view must be usable
+  // without switching tabs, including when clipboard access is unavailable.
   assert.equal(qr.password, uiPassword);
   assert.equal(qr.name, uiTitle);
+  await expect(page.getByText(/扫码可能不会自动填入 Password/)).toBeVisible();
+  await expect(page.getByLabel("订阅加密密码", { exact: true })).toHaveAttribute(
+    "type",
+    "password",
+  );
+  // Keep tsx/esbuild's function-name helper out of the browser execution context.
+  await page.evaluate(`(() => {
+    Object.defineProperty(navigator.clipboard, "writeText", {
+      configurable: true,
+      value: async () => {
+        throw new DOMException("Permission denied", "NotAllowedError");
+      },
+    });
+  })()`);
+  await page.getByRole("button", { name: "复制密码", exact: true }).click();
+  await expect(
+    page.getByText("无法访问剪贴板，请显示密码后手动选择并复制", { exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "显示密码", exact: true }).click();
+  await expect(page.getByLabel("订阅加密密码", { exact: true })).toHaveAttribute("type", "text");
+  await expect(page.getByLabel("订阅加密密码", { exact: true })).toHaveValue(uiPassword);
+  await page.getByRole("button", { name: "隐藏密码", exact: true }).click();
+  await page.evaluate(() => Reflect.deleteProperty(navigator.clipboard, "writeText"));
+  await page.getByRole("button", { name: "复制密码", exact: true }).click();
+  await page.getByRole("button", { name: "已复制密码", exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), uiPassword);
+  await expect(
+    page.getByText("无法访问剪贴板，请显示密码后手动选择并复制", { exact: true }),
+  ).toHaveCount(0);
   await shot("subscription-qr-desktop.png");
   await page.emulateMedia({ colorScheme: "dark" });
   assert.deepEqual(await readQr(), qr, "QR stays scannable in dark mode");
@@ -759,7 +791,7 @@ try {
     await page.getByLabel("订阅加密密码", { exact: true }).getAttribute("type"),
     "password",
   );
-  await page.getByRole("button", { name: "复制密码", exact: true }).click();
+  await page.getByRole("button", { name: "已复制密码", exact: true }).click();
   await page.getByRole("button", { name: "已复制密码", exact: true }).waitFor();
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), uiPassword);
   assert((await decryptSubscription(await fetch(uiUrl), uiPassword)).includes("anytls://"));
@@ -866,6 +898,13 @@ try {
     .filter({ has: page.getByRole("heading", { name: "手机 · 已编辑", exact: true }) });
   await editedRow.getByRole("button", { name: "订阅链接", exact: true }).click();
   assert.deepEqual(await readQr(), { url: uiUrl, password: uiNextPassword, name: uiNextTitle });
+  await expect(page.getByLabel("订阅加密密码", { exact: true })).toHaveAttribute(
+    "type",
+    "password",
+  );
+  await page.getByRole("button", { name: "复制密码", exact: true }).click();
+  await page.getByRole("button", { name: "已复制密码", exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), uiNextPassword);
   await shot("subscription-qr-mobile.png");
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
   await page.getByRole("tab", { name: "手动复制", exact: true }).click();

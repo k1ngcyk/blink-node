@@ -24,7 +24,8 @@ export type SubscriptionData = {
 };
 export type SubscriptionAccess = { url: string; encryptionPassword: string; displayName: string };
 
-// Shadowrocket's native subscription share format, including its local decryption password.
+// Shadowrocket's export format includes the password, but its 2.2.93 sub:// importer
+// does not restore that query field. Always offer a separate password copy control.
 export function shadowrocketSubscriptionUri(access: SubscriptionAccess) {
   const encoded = btoa(
     Array.from(new TextEncoder().encode(access.url), (byte) => String.fromCharCode(byte)).join(""),
