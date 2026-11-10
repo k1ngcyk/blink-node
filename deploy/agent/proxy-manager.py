@@ -47,6 +47,7 @@ MUSL = Path('/etc/alpine-release').exists() or bool(glob.glob('/lib/ld-musl-*.so
 UNITS = Path('/etc/init.d' if OPENRC else '/etc/systemd/system')
 UNIT_MODE = 0o755 if OPENRC else 0o644
 WEB_SERVICE = 'blink-proxy-web' + ('' if OPENRC else '.service')
+TLS_SERVICE = 'blink-proxy-tls' + ('' if OPENRC else '.service')
 MANIFEST = Path('/usr/local/libexec/blink-proxy/assets.json')
 CONTROL = '/run/blink-proxy/control.sock'
 ADMIN = 'unix//run/blink-proxy-web/admin.sock'
@@ -152,7 +153,9 @@ def service(args, optional=False):
             require(pid.isdigit(), '服务进程无效')
             fields = (PROC / pid / 'stat').read_text().rsplit(')', 1)[1].split()
             args = (PROC / pid / 'cmdline').read_bytes().split(b'\0')
-            return 'active' if fields[0] != 'Z' and args[0] in [os.fsencode(binary(e)) for e in ('xray', 'sing-box', 'caddy')] else 'inactive'
+            if args and re.fullmatch(rb'(?:.*/)?qemu-(?:aarch64|x86_64)(?:-static)?', args[0]):
+                args = args[1:]
+            return 'active' if fields[0] != 'Z' and args and args[0] in [os.fsencode(binary(e)) for e in ('xray', 'sing-box', 'caddy', 'haproxy')] else 'inactive'
         except (OSError, IndexError, DeploymentError):
             return 'inactive'
     if action == 'enable':
@@ -164,8 +167,8 @@ def service(args, optional=False):
             run(['rc-service', name, 'stop'], optional=optional)
         if Path('/etc/runlevels/default', name).exists():
             run(['rc-update', 'del', name, 'default'], optional=optional)
-    elif action == 'restart' or action == 'try-restart' and service(['is-active', name]) == 'active':
-        return run(['rc-service', name, 'restart'], optional=optional)
+    elif action in ('restart', 'stop') or action == 'try-restart' and service(['is-active', name]) == 'active':
+        return run(['rc-service', name, 'restart' if action == 'try-restart' else action], optional=optional)
     elif action != 'try-restart':
         raise DeploymentError('服务操作不受支持')
     return ''
@@ -252,13 +255,15 @@ def validate_payload(data):
         secret = item['credentials']
         if kind != 'shadowsocks2022':
             require(DOMAIN.fullmatch(item['domain']) and '@' in data['email'], '域名或 ACME 邮箱无效')
-        if kind == 'reality':
-            require(port == 443, 'REALITY 入口必须为 443')
+        if kind != 'shadowsocks2022':
             fallback = item['fallbackPort']
-            require(type(fallback) is int and 1024 <= fallback <= 65535 and fallback not in ports, '本地 TLS 端口冲突')
+            require(type(fallback) is int and 1024 <= fallback <= 65535 and fallback not in ports, '本地服务端口冲突')
             ports.add(fallback)
+        if kind == 'reality' or kind == 'anytls' and item['upstream']:
             upstream = urllib.parse.urlsplit(item['upstream'])
             require(upstream.scheme == 'https' and DOMAIN.fullmatch(upstream.hostname or '') and not upstream.username and not upstream.password and upstream.path in ('', '/') and not upstream.query and not upstream.fragment, '上游地址无效')
+        if kind == 'reality':
+            require(port == 443, 'REALITY 入口必须为 443')
             require(str(uuid.UUID(secret['uuid'])) == secret['uuid'] and re.fullmatch(r'[A-Za-z0-9_-]{43}', secret['privateKey']) and re.fullmatch(r'[a-f0-9]{16}', secret['shortId']), 'REALITY 密钥无效')
         else:
             import base64
@@ -315,10 +320,10 @@ def core_config(item):
     inbound = {'type': 'anytls' if item['kind'] == 'anytls' else 'shadowsocks',
                'tag': item['id'], 'listen': '::', 'listen_port': item['port']}
     if item['kind'] == 'anytls':
-        inbound.update({'users': [{'name': 'owner', 'password': secret['password']}], 'tls': {
-            'enabled': True, 'server_name': item['domain'],
-            'certificate_path': str(ROOT / 'certificates' / item['domain'] / 'fullchain.pem'),
-            'key_path': str(ROOT / 'certificates' / item['domain'] / 'key.pem')}})
+        # HAProxy terminates public TLS, then forwards authenticated AnyTLS
+        # bytes to this loopback-only listener. sing-box still verifies users.
+        inbound.update({'listen': '127.0.0.1', 'listen_port': item['fallbackPort'],
+                        'users': [{'name': 'owner', 'password': secret['password']}]})
     else:
         inbound.update({'method': secret['method'], 'password': secret['password']})
         if not item['udp']:
@@ -339,6 +344,42 @@ def core_config(item):
             'dns': {'servers': [{'type': 'local', 'tag': 'system'}]}}
 
 
+def website_handler(item):
+    if not item['upstream']:
+        return {'handler': 'static_response', 'status_code': 200,
+                'headers': {'Content-Type': ['text/html; charset=utf-8'], 'X-Content-Type-Options': ['nosniff']},
+                'body': '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Welcome</title><style>body{margin:0;font:18px system-ui;background:#faf9f6;color:#252525}main{max-width:640px;margin:20vh auto;padding:32px}h1{font-size:48px;font-weight:500;letter-spacing:-2px}p{color:#666;line-height:1.7}</style><main><h1>Welcome.</h1><p>This website is ready. More to come soon.</p></main></html>'}
+    upstream = urllib.parse.urlsplit(item['upstream'])
+    return {'handler': 'reverse_proxy', 'transport': {'protocol': 'http', 'tls': {'server_name': upstream.hostname}},
+            'upstreams': [{'dial': upstream.hostname + ':' + str(upstream.port or 443)}],
+            'headers': {'request': {'set': {'Host': [upstream.netloc]}}, 'response': {'delete': ['Alt-Svc']}}}
+
+
+def web_socket(item):
+    return '/run/blink-proxy-web/' + item['id'] + '.sock'
+
+
+def haproxy_config(data):
+    instances = [item for item in data['instances'] if item['kind'] == 'anytls']
+    if not instances:
+        return None
+    lines = ['global', '  maxconn 4096', '  ssl-default-bind-options ssl-min-ver TLSv1.2',
+             'defaults', '  mode tcp', '  timeout connect 5s', '  timeout client 1h', '  timeout server 1h']
+    for item in instances:
+        name = item['id']
+        pem = ROOT / 'certificates' / item['domain'] / 'combined.pem'
+        lines += ['frontend tls_' + name,
+                  '  bind :::' + str(item['port']) + ' v4v6 ssl crt ' + str(pem) + ' alpn h2,http/1.1',
+                  '  tcp-request inspect-delay 5s',
+                  '  acl authenticated req.payload(0,32) -m bin ' + hashlib.sha256(item['credentials']['password'].encode()).hexdigest(),
+                  '  tcp-request content accept if { req.len ge 32 }',
+                  '  use_backend anytls_' + name + ' if authenticated',
+                  '  default_backend website_' + name,
+                  'backend anytls_' + name, '  server core 127.0.0.1:' + str(item['fallbackPort']),
+                  'backend website_' + name, '  server web unix@' + web_socket(item)]
+    return ('\n'.join(lines) + '\n').encode()
+
+
 def caddy_config(data):
     instances = [i for i in data['instances'] if i['kind'] != 'shadowsocks2022']
     if not instances:
@@ -346,18 +387,15 @@ def caddy_config(data):
     servers = {'http': {'listen': [':80'], 'protocols': ['h1'], 'routes': [{'handle': [{
         'handler': 'static_response', 'headers': {'Location': ['https://{http.request.host}{http.request.uri}']}, 'status_code': 301}]}]}}
     for item in instances:
-        if item['kind'] != 'reality':
+        if item['kind'] == 'anytls':
+            servers[item['id']] = {'listen': ['unix/' + web_socket(item)], 'protocols': ['h1', 'h2c'],
+                                  'routes': [{'handle': [website_handler(item)]}]}
             continue
-        upstream = urllib.parse.urlsplit(item['upstream'])
-        host = upstream.hostname
         servers[item['id']] = {'listen': ['127.0.0.1:' + str(item['fallbackPort'])],
             'listener_wrappers': [{'wrapper': 'proxy_protocol', 'allow': ['127.0.0.1/32']}, {'wrapper': 'tls'}],
             'protocols': ['h1', 'h2'],
             'tls_connection_policies': [{'match': {'sni': [item['domain']]}, 'alpn': ['h2', 'http/1.1']}],
-            'routes': [{'match': [{'host': [item['domain']]}], 'handle': [{'handler': 'reverse_proxy',
-                'transport': {'protocol': 'http', 'tls': {'server_name': host}},
-                'upstreams': [{'dial': host + ':' + str(upstream.port or 443)}],
-                'headers': {'request': {'set': {'Host': [upstream.netloc]}}, 'response': {'delete': ['Alt-Svc']}}}]}]}
+            'routes': [{'match': [{'host': [item['domain']]}], 'handle': [website_handler(item)]}]}
     return {'admin': {'listen': ADMIN}, 'storage': {'module': 'file_system', 'root': str(ROOT / 'caddy')},
             'apps': {'http': {'servers': servers}, 'tls': {
                 'certificates': {'automate': sorted({i['domain'] for i in instances})},
@@ -367,6 +405,8 @@ def caddy_config(data):
 
 
 def binary(engine):
+    if engine == 'haproxy':
+        return Path('/usr/sbin/haproxy')
     manifest = read_json(MANIFEST)
     suffix = '-musl' if MUSL and 'musl' in manifest[engine] else ''
     return BIN / (engine + '-' + manifest[engine]['version'] + suffix)
@@ -378,6 +418,16 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def install_binary(engine):
+    if engine == 'haproxy':
+        if not binary(engine).is_file():
+            if shutil.which('apk'):
+                run(['apk', 'add', '--no-cache', 'haproxy'], timeout=180)
+            elif shutil.which('apt-get'):
+                run(['apt-get', 'update'], timeout=180)
+                run(['apt-get', 'install', '-y', 'haproxy'], timeout=180)
+            else:
+                raise DeploymentError('请先安装支持 TLS 的 HAProxy')
+        return
     # The manager uses UMask=0077, while cores run as blink-proxy. Repair cached
     # installations too: a 0755 executable is unusable below a root-only directory.
     BIN.mkdir(parents=True, exist_ok=True)
@@ -417,8 +467,8 @@ def install_binary(engine):
 
 
 def unit(engine, config_path):
+    args = ['-db', '-f', str(config_path)] if engine == 'haproxy' else ['run', '--config' if engine == 'caddy' else '-c', str(config_path)]
     if OPENRC:
-        args = ['run', '--config' if engine == 'caddy' else '-c', str(config_path)]
         extra = '    checkpath --directory --mode 0700 --owner blink-proxy:blink-proxy /run/blink-proxy-web\n' if engine == 'caddy' else ''
         return ('#!/sbin/openrc-run\n'
                 'description="Blink managed ' + engine + '"\nsupervisor=supervise-daemon\n'
@@ -432,7 +482,7 @@ def unit(engine, config_path):
                 '    checkpath --directory --mode 0750 --owner root:blink-proxy /var/log/blink-proxy\n'
                 '    checkpath --file-truncate --mode 0640 --owner blink-proxy:blink-proxy "$output_log"\n'
                 + extra + '}\n').encode()
-    command = str(binary(engine)) + (' run --config ' if engine == 'caddy' else ' run -c ') + str(config_path)
+    command = str(binary(engine)) + ' ' + ' '.join(args)
     extra = 'RuntimeDirectory=blink-proxy-web\nRuntimeDirectoryMode=0700\n' if engine == 'caddy' else ''
     return ('[Unit]\nDescription=Blink managed ' + engine + '\nAfter=network-online.target\nWants=network-online.target\n'
             '[Service]\nUser=blink-proxy\nGroup=blink-proxy\nExecStart=' + command + '\n'
@@ -601,6 +651,7 @@ def certificate_info(path):
 def sync_certificates(data, restart=True):
     user = pwd.getpwnam('blink-proxy')
     domains = {}
+    pending_frontend = []
     for item in data.get('instances', []):
         if item['kind'] == 'anytls':
             domains.setdefault(item['domain'], []).append(item)
@@ -616,19 +667,30 @@ def sync_certificates(data, restart=True):
         os.chown(directory, 0, user.pw_gid)
         certificate, key = source[0].read_bytes(), source[1].read_bytes()
         current = directory / 'fullchain.pem'
-        changed = not current.exists() or current.read_bytes() != certificate
+        combined = directory / 'combined.pem'
+        pem = certificate.rstrip() + b'\n' + key.rstrip() + b'\n'
+        changed = not combined.exists() or combined.read_bytes() != pem
         if changed:
             for item in instances:
                 atomic(PRIVATE / 'certificate-restarts' / item['id'], b'pending')
             atomic(directory / 'key.pem', key, 0o640, (0, user.pw_gid))
             atomic(current, certificate, 0o640, (0, user.pw_gid))
+            atomic(combined, pem, 0o640, (0, user.pw_gid))
         if restart:
             for item in instances:
                 pending = PRIVATE / 'certificate-restarts' / item['id']
                 if not pending.exists():
                     continue
-                service(['try-restart', service_name(item)])
-                pending.unlink()
+                if (ROOT / 'current' / 'haproxy.cfg').exists():
+                    pending_frontend.append(pending)
+                else:
+                    service(['try-restart', service_name(item)])
+                    pending.unlink()
+    if pending_frontend:
+        service(['try-restart', TLS_SERVICE])
+        wait_service(TLS_SERVICE)
+        for pending in pending_frontend:
+            pending.unlink()
 
 
 def wait_certificates(data, deadline):
@@ -668,6 +730,14 @@ def tls_probe(item):
             require(secure.version() == 'TLSv1.3', '本地 REALITY 目标需要 TLS 1.3')
 
 
+def website_probe(item):
+    with socket.create_connection(('127.0.0.1', item['port']), timeout=8) as raw:
+        with ssl.create_default_context().wrap_socket(raw, server_hostname=item['domain']) as secure:
+            secure.sendall(('GET / HTTP/1.1\r\nHost: ' + item['domain'] + '\r\nConnection: close\r\n\r\n').encode())
+            response = secure.recv(4096)
+            require(re.match(rb'HTTP/1\.[01] [234][0-9]{2} ', response), 'AnyTLS 网站回落检查失败')
+
+
 def recover():
     transaction = read_json(PRIVATE / 'transaction.json')
     if not transaction:
@@ -678,6 +748,8 @@ def recover():
         (PRIVATE / 'transaction.json').unlink()
         return
     previous = transaction.get('previous')
+    if TLS_SERVICE in transaction.get('unitBackups', {}) or TLS_SERVICE in transaction.get('newUnits', []):
+        service(['stop', TLS_SERVICE], optional=True)
     for name in transaction.get('newUnits', []):
         service(['disable', '--now', name], optional=True)
         (UNITS / name).unlink(missing_ok=True)
@@ -696,6 +768,10 @@ def recover():
         for item in previous_data['instances']:
             service(['enable', '--now', service_name(item)], optional=True)
             service(['restart', service_name(item)], optional=True)
+        if (Path(previous) / 'haproxy.cfg').exists():
+            service(['enable', TLS_SERVICE], optional=True)
+            service(['restart', TLS_SERVICE], optional=True)
+            wait_service(TLS_SERVICE)
     recover_firewall(transaction)
     atomic(PRIVATE / 'applied.json', canonical(transaction.get('appliedBefore', {'version': 0})))
     (PRIVATE / 'transaction.json').unlink()
@@ -765,8 +841,11 @@ def apply(data, version, deadline):
     check_dns(data)
     engines = {'xray' if i['kind'] == 'reality' else 'sing-box' for i in data['instances']}
     web = caddy_config(data)
+    frontend = haproxy_config(data)
     if web:
         engines.add('caddy')
+    if frontend:
+        engines.add('haproxy')
     for engine in engines:
         install_binary(engine)
     user = pwd.getpwnam('blink-proxy')
@@ -791,9 +870,14 @@ def apply(data, version, deadline):
         atomic(generation / 'caddy.json', canonical(web), 0o640, (0, user.pw_gid))
         run([str(binary('caddy')), 'validate', '--config', str(generation / 'caddy.json')], as_proxy=True)
         desired_units[WEB_SERVICE] = unit('caddy', ROOT / 'current' / 'caddy.json')
+    if frontend:
+        atomic(generation / 'haproxy.cfg', frontend, 0o640, (0, user.pw_gid))
+        desired_units[TLS_SERVICE] = unit('haproxy', ROOT / 'current' / 'haproxy.cfg')
     old_units = [service_name(i) for i in old['instances']]
     if caddy_config(old):
         old_units.append(WEB_SERVICE)
+    if previous and (Path(previous) / 'haproxy.cfg').exists():
+        old_units.append(TLS_SERVICE)
     transaction = {'previous': previous, 'generation': str(generation), 'appliedBefore': applied,
                    'unitBackups': {name: (UNITS / name).read_text() for name in set(old_units) | set(desired_units) if (UNITS / name).exists()},
                    'newUnits': [name for name in desired_units if not (UNITS / name).exists()],
@@ -812,6 +896,10 @@ def apply(data, version, deadline):
                 service(['enable', '--now', WEB_SERVICE])
             wait_service(WEB_SERVICE)
             wait_certificates(data, deadline)
+        if frontend:
+            run([str(binary('haproxy')), '-c', '-f', str(generation / 'haproxy.cfg')], as_proxy=True)
+        if TLS_SERVICE in old_units:
+            service(['stop', TLS_SERVICE])
         for item in data['instances']:
             check_core(item, generation / (item['id'] + '.json'))
             if item['kind'] == 'reality':
@@ -819,6 +907,14 @@ def apply(data, version, deadline):
             service(['enable', service_name(item)])
             service(['restart', service_name(item)])
             wait_service(service_name(item))
+        if frontend:
+            service(['enable', TLS_SERVICE])
+            service(['restart', TLS_SERVICE])
+            wait_service(TLS_SERVICE)
+            for item in data['instances']:
+                if item['kind'] == 'anytls':
+                    website_probe(item)
+                    (PRIVATE / 'certificate-restarts' / item['id']).unlink(missing_ok=True)
         for name in old_units:
             if name not in desired_units:
                 service(['disable', '--now', name])
@@ -828,7 +924,7 @@ def apply(data, version, deadline):
                 ufw_change(rule, delete=True)
         atomic(PRIVATE / 'firewall.json', canonical(firewall))
         atomic(PRIVATE / 'applied.json', canonical({'version': version, 'fingerprint': fingerprint,
-            'files': {path.name: digest(path.read_bytes()) for path in generation.glob('*.json')}}))
+            'files': {path.name: digest(path.read_bytes()) for path in generation.iterdir() if path.suffix in ('.json', '.cfg')}}))
         (PRIVATE / 'transaction.json').unlink()
         return {'status': status(data), 'warnings': warnings}
     except Exception:
@@ -843,6 +939,9 @@ def status(data=None, refresh_network=False):
     for item in data['instances']:
         row = {'id': item['id'], 'kind': item['kind'], 'port': item['port'],
                'state': service(['is-active', service_name(item)], optional=True).strip() or 'inactive'}
+        if item['kind'] == 'anytls' and (ROOT / 'current' / 'haproxy.cfg').exists():
+            if any(service(['is-active', name], optional=True).strip() != 'active' for name in (WEB_SERVICE, TLS_SERVICE)):
+                row['state'] = 'inactive'
         source = certificate_source(item['domain']) if item['kind'] != 'shadowsocks2022' else None
         if source:
             row['certificate'] = certificate_info(source[0])

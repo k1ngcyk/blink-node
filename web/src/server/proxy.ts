@@ -445,7 +445,7 @@ export async function proxyApi(
     }
     const id = path[2] ? uuid.parse(path[2]) : randomUUID();
     const input = method === "DELETE" ? null : await body(request, instanceInput);
-    if (input?.kind === "reality") {
+    if (input?.upstream && input.kind !== "shadowsocks2022") {
       try {
         await validateUpstream("http", input.upstream);
       } catch {
@@ -513,10 +513,11 @@ export async function proxyApi(
           collisions.some(
             (i) =>
               i.spec.port === input.port ||
-              (i.spec.kind === "reality" && i.spec.fallbackPort === input.port) ||
-              (input.kind === "reality" &&
+              (i.spec.kind !== "shadowsocks2022" && i.spec.fallbackPort === input.port) ||
+              (input.kind !== "shadowsocks2022" &&
                 (input.fallbackPort === i.spec.port ||
-                  (i.spec.kind === "reality" && input.fallbackPort === i.spec.fallbackPort))),
+                  (i.spec.kind !== "shadowsocks2022" &&
+                    input.fallbackPort === i.spec.fallbackPort))),
           )
         )
           throw new HttpError(409, "代理监听端口冲突");

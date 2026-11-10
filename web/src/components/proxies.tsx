@@ -893,9 +893,7 @@ function ProxyForm({
             max={65535}
             required
             readOnly={kind === "reality"}
-            defaultValue={
-              instance?.spec.port ?? (kind === "reality" ? 443 : kind === "anytls" ? 8443 : 8388)
-            }
+            defaultValue={instance?.spec.port ?? (kind === "shadowsocks2022" ? 8388 : 443)}
           />
         </label>
         {kind !== "shadowsocks2022" && (
@@ -910,10 +908,10 @@ function ProxyForm({
             <small>用于证书验证和 TLS 握手，客户端连接地址为节点公网 IP。</small>
           </label>
         )}
-        {kind === "reality" && (
+        {kind !== "shadowsocks2022" && (
           <>
             <label className="field">
-              本机 Caddy TLS 端口
+              {kind === "reality" ? "本机 Caddy TLS 端口" : "本机 AnyTLS 内部端口"}
               <Input
                 name="fallbackPort"
                 type="number"
@@ -922,6 +920,7 @@ function ProxyForm({
                 defaultValue={instance?.spec.fallbackPort ?? 8003}
                 required
               />
+              {kind === "anytls" && <small>仅监听本机，公网端口同时提供代理和网页访问。</small>}
             </label>
             <label className="field">
               伪装网站上游
@@ -930,8 +929,11 @@ function ProxyForm({
                 type="url"
                 placeholder="https://www.example.com"
                 defaultValue={instance?.spec.upstream}
-                required
+                required={kind === "reality"}
               />
+              {kind === "anytls" && (
+                <small>可选。留空显示默认欢迎页；填写后反向代理该 HTTPS 网站。</small>
+              )}
             </label>
           </>
         )}

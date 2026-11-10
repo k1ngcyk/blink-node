@@ -51,6 +51,8 @@ export const instanceInput = z
       ctx.addIssue({ code: "custom", message: "TLS / 证书需要域名" });
     if (v.kind === "reality") {
       if (v.port !== 443) ctx.addIssue({ code: "custom", message: "REALITY 入口固定为 443" });
+    }
+    if (v.kind === "reality" || (v.kind === "anytls" && v.upstream)) {
       try {
         const u = new URL(v.upstream);
         if (

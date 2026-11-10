@@ -300,5 +300,27 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(self.check(running=False), (False, 0))
 
 
+class OpenRCIdentityTests(unittest.TestCase):
+    def test_native_and_binfmt_children_reject_other_programs_and_zombies(self):
+        binary = str(updater.BINARY).encode()
+        stat = '123 (blink-agent) S ' + '0 ' * 18 + '12345'
+        for cmdline, expected in (
+            (binary + b'\0run\0', True),
+            (b'/usr/bin/qemu-aarch64\0' + binary + b'\0run\0', True),
+            (b'/usr/bin/qemu-x86_64-static\0' + binary + b'\0run\0', True),
+            (b'/bin/sh\0' + binary + b'\0', False),
+            (b'/usr/bin/qemu-aarch64\0/bin/sh\0' + binary + b'\0', False),
+        ):
+            with self.subTest(cmdline=cmdline), \
+                 patch.object(updater.subprocess, 'run', side_effect=[SimpleNamespace(returncode=0), SimpleNamespace(stdout='123:started')]), \
+                 patch.object(updater.Path, 'read_text', return_value=stat), \
+                 patch.object(updater.Path, 'read_bytes', return_value=cmdline):
+                self.assertEqual(updater.OpenRCService().active(), expected)
+        with patch.object(updater.subprocess, 'run', side_effect=[SimpleNamespace(returncode=0), SimpleNamespace(stdout='123:started')]), \
+             patch.object(updater.Path, 'read_text', return_value=stat.replace(') S ', ') Z ')), \
+             patch.object(updater.Path, 'read_bytes', return_value=binary):
+            self.assertFalse(updater.OpenRCService().active())
+
+
 if __name__ == '__main__':
     unittest.main()

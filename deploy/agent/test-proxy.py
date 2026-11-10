@@ -34,6 +34,30 @@ def fixture():
 
 
 class ProxyTests(unittest.TestCase):
+    def test_anytls_website_uses_authenticated_tls_split_and_private_core(self):
+        item = fixture()
+        item.update(kind='anytls', upstream='', credentials={'password': base64.b64encode(secrets.token_bytes(32)).decode()})
+        data = {'instances': [item], 'addresses': ['8.8.8.8'], 'email': 'test@example.com', 'firewall': 'external'}
+        m.validate_payload(data)
+        inbound = m.core_config(item)['inbounds'][0]
+        self.assertEqual(inbound['listen'], '127.0.0.1')
+        self.assertEqual(inbound['listen_port'], item['fallbackPort'])
+        self.assertNotIn('tls', inbound)
+        self.assertEqual(inbound['users'][0]['password'], item['credentials']['password'])
+        frontend = m.haproxy_config(data).decode()
+        self.assertIn(m.digest(item['credentials']['password'].encode()), frontend)
+        self.assertNotIn(item['credentials']['password'], frontend)
+        self.assertIn('alpn h2,http/1.1', frontend)
+        web = m.caddy_config(data)['apps']['http']['servers'][item['id']]
+        self.assertEqual(web['protocols'], ['h1', 'h2c'])
+        self.assertIn('Welcome.', web['routes'][0]['handle'][0]['body'])
+        item['upstream'] = 'https://www.example.com'
+        self.assertEqual(m.website_handler(item)['upstreams'], [{'dial': 'www.example.com:443'}])
+        other = fixture()
+        other.update(id=str(uuid.uuid4()), kind='anytls', port=8443, credentials=item['credentials'])
+        with self.assertRaises(m.DeploymentError):
+            m.validate_payload({**data, 'instances': [item, other]})
+
     def test_mihomo_paths_yaml_summary_and_active_process(self):
         self.assertEqual(m.config_files(['mihomo', '-d', 'configs'], '/srv'), [Path('/srv/configs/config.yaml')])
         self.assertEqual(m.config_files(['clash-meta', '-d=/etc/mihomo', '-f=custom.yml'], '/srv'), [Path('/srv/custom.yml')])
@@ -448,9 +472,10 @@ def integration():
         for server in servers:
             threading.Thread(target=server.serve_forever, daemon=True).start()
         def launch(engine, config, name):
-            path = work / (name + '.json'); path.write_text(json.dumps(config))
+            path = work / (name + ('.cfg' if engine == 'haproxy' else '.json'))
+            path.write_bytes(config if isinstance(config, bytes) else json.dumps(config).encode())
             log = open(work / (name + '.log'), 'wb')
-            args = [str(bins[engine]), 'run', '--config' if engine == 'caddy' else '-c', str(path)]
+            args = [str(bins[engine]), *(['-db', '-f', str(path)] if engine == 'haproxy' else ['run', '--config' if engine == 'caddy' else '-c', str(path)])]
             env = {**os.environ, 'SSL_CERT_FILE': str(ca)}
             p = subprocess.Popen(args, stdout=log, stderr=log, env=env)
             processes.append((p, log, name))
@@ -475,8 +500,9 @@ def integration():
         server_key, user_key = (base64.b64encode(secrets.token_bytes(16)).decode() for _ in range(2))
         imported_exit = {'id': str(uuid.uuid4()), 'address': '127.0.0.1', 'port': 18389, 'udp': True, 'method': '2022-blake3-aes-128-gcm', 'password': server_key + ':' + user_key}
         reality.update(exits=[exit, imported_exit], defaultOutbound=ss['id'], rules=[{'match': 'domain', 'values': ['imported.test'], 'outbound': imported_exit['id']}, {'match': 'domain', 'values': ['direct.test'], 'outbound': 'direct'}, {'match': 'ip_cidr', 'values': ['127.0.0.2/32'], 'outbound': 'direct'}])
-        anytls = copy.deepcopy(reality); anytls.update(id=str(uuid.uuid4()), kind='anytls', port=18444, domain='any.example.test', credentials={'password': base64.b64encode(secrets.token_bytes(32)).decode()})
+        anytls = copy.deepcopy(reality); anytls.update(id=str(uuid.uuid4()), kind='anytls', port=18444, fallbackPort=8004, domain='any.example.test', credentials={'password': base64.b64encode(secrets.token_bytes(32)).decode()})
         data = {'instances': [reality, anytls], 'addresses': ['8.8.8.8'], 'email': 'test@example.test', 'firewall': 'external'}
+        Path('/run/blink-proxy-web').mkdir(exist_ok=True)
         web = m.caddy_config(data)
         web['admin'] = {'disabled': True}
         web['storage']['root'] = str(work / 'caddy-storage')
@@ -492,8 +518,12 @@ def integration():
         reality_config['outbounds'][0]['settings']['finalRules'] = [{'action': 'allow', 'ip': ['127.0.0.0/8']}]
         launch('xray', reality_config, 'reality'); ready(443)
         any_config = m.core_config(anytls)
-        any_config['inbounds'][0]['tls'].update(certificate_path=str(cert), key_path=str(key))
-        launch('sing-box', any_config, 'anytls'); ready(18444)
+        launch('sing-box', any_config, 'anytls'); ready(8004)
+        bins['haproxy'] = Path('/usr/sbin/haproxy')
+        pem = work / 'certificates' / anytls['domain'] / 'combined.pem'; pem.parent.mkdir(parents=True)
+        pem.write_bytes(cert.read_bytes() + key.read_bytes())
+        with patch.object(m, 'ROOT', work):
+            launch('haproxy', m.haproxy_config(data), 'tls-front'); ready(18444)
         for protocol, port, server_port in [('vless', 19080, 443), ('anytls', 19081, 18444)]:
             if protocol == 'vless':
                 launch('xray', {'log': {'loglevel': 'warning'},
@@ -512,6 +542,7 @@ def integration():
                 outbound['tls'].update(utls={'enabled': True, 'fingerprint': 'chrome'}, reality={'enabled': True, 'public_key': public, 'short_id': reality['credentials']['shortId']})
             else:
                 outbound.update(password=anytls['credentials']['password'])
+                outbound['tls']['alpn'] = ['h2', 'http/1.1']
             launch('sing-box', {'inbounds': [{'type': 'mixed', 'listen': '127.0.0.1', 'listen_port': port}], 'outbounds': [outbound]}, 'client-' + protocol)
             ready(port)
         def get(port, host):
@@ -522,6 +553,10 @@ def integration():
                 assert result.returncode == 0 and result.stdout == b'blink-proxy-ok', (port, host, result.stderr)
         fallback = subprocess.run(['curl', '-fsS', '--max-time', '10', '--noproxy', '*', '--cacert', str(ca), 'https://entry.example.test/'], capture_output=True)
         assert fallback.returncode == 0 and fallback.stdout == b'blink-proxy-ok', fallback.stderr
+        for protocol in ('--http1.1', '--http2'):
+            fallback = subprocess.run(['curl', '-fsS', protocol, '--max-time', '10', '--noproxy', '*', '--cacert', str(ca), '-w', '\n%{http_version}', 'https://any.example.test:18444/asset?test=1'], capture_output=True)
+            assert fallback.returncode == 0 and fallback.stdout.splitlines()[0] == b'blink-proxy-ok', fallback.stderr
+            assert fallback.stdout.splitlines()[-1] == (b'2' if protocol == '--http2' else b'1.1'), fallback.stdout
         import socketserver
         class Echo(socketserver.BaseRequestHandler):
             def handle(self):
@@ -580,7 +615,7 @@ def integration():
                 running[name] = process
                 processes.append((process, log, Path(log.name).stem))
                 time.sleep(0.2)
-            elif action == 'disable':
+            elif action in ('disable', 'stop'):
                 stop(name)
             elif action == 'is-active':
                 return 'active' if name in running and running[name].poll() is None else ''

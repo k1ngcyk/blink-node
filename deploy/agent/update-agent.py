@@ -277,7 +277,11 @@ class OpenRCService(Service):
         try:
             fields = Path('/proc', pid, 'stat').read_text().rsplit(')', 1)[1].split()
             args = Path('/proc', pid, 'cmdline').read_bytes().split(b'\0')
-            if fields[0] == 'Z' or args[0] != os.fsencode(BINARY):
+            # binfmt/QEMU exposes the interpreter before the guest executable
+            # when another process reads /proc/<pid>/cmdline.
+            if args and re.fullmatch(rb'(?:.*/)?qemu-(?:aarch64|x86_64)(?:-static)?', args[0]):
+                args = args[1:]
+            if fields[0] == 'Z' or not args or args[0] != os.fsencode(BINARY):
                 return {'ActiveState': 'inactive'}
         except (OSError, IndexError):
             return {'ActiveState': 'inactive'}

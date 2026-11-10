@@ -83,13 +83,35 @@ def load(name, path):
     return module
 
 
+def service_diagnostics():
+    diagnostics = []
+    for name in ('blink-agent', 'blink-proxy-manager'):
+        result = subprocess.run(['rc-service', name, 'status'], capture_output=True, text=True, timeout=10)
+        diagnostics.append(name + ': ' + result.stdout + result.stderr)
+        child = Path('/run/openrc/options', name, 'child_pid')
+        if child.exists():
+            pid = child.read_text().strip()
+            for field in ('stat', 'cmdline'):
+                path = Path('/proc', pid, field)
+                if path.exists():
+                    diagnostics.append(field + ': ' + path.read_bytes().decode(errors='replace'))
+        log = Path('/var/log', name, 'current.log')
+        if log.exists():
+            diagnostics.append(log.read_text()[-4000:])
+    details = '\n'.join(diagnostics)
+    for secret in (state['token'], state.get('credential', '')):
+        if secret:
+            details = details.replace(secret, '[redacted]')
+    return details
+
+
 def wait(predicate, timeout=20):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
             return
         time.sleep(0.2)
-    raise AssertionError('Service did not become ready')
+    raise AssertionError('Service did not become ready\n' + service_diagnostics())
 
 
 command = ['bash', str(release / 'install.sh'), '--server', origin, '--allow-insecure-localhost']
@@ -113,7 +135,7 @@ spec = importlib.util.spec_from_loader(loader.name, loader)
 updater = importlib.util.module_from_spec(spec); loader.exec_module(updater)
 service = updater.OpenRCService()
 wait(service.active)
-assert service.healthy(timeout=20), 'OpenRC updater must observe a real welcome'
+assert service.healthy(timeout=20), 'OpenRC updater must observe a real welcome\n' + service_diagnostics()
 pid = service.properties()['MainPID']
 assert Path('/proc', pid).stat().st_uid == pwd.getpwnam('blink-agent').pw_uid
 assert json.loads(run(['su', 'blink-agent', '-s', '/bin/sh', '-c', '/usr/local/bin/blink-agent inspect']))['memoryTotal'] > 0
@@ -123,7 +145,7 @@ wait(lambda: service.active() and service.properties()['MainPID'] != pid)
 assert not service.healthy(timeout=12), 'Automatic respawn must not reuse an earlier welcome'
 state['welcome'] = True
 service.restart(); wait(service.active)
-assert service.healthy(timeout=20)
+assert service.healthy(timeout=20), service_diagnostics()
 assert not list(Path('/var/tmp').glob('blink-install.*'))
 duplicate = subprocess.run(command, input=state['token'] + '\n', capture_output=True, text=True, timeout=90)
 assert duplicate.returncode and 'Existing' in duplicate.stderr
@@ -141,7 +163,7 @@ service.restart(); wait(service.active)
 assert not service.healthy(timeout=2), 'Prior log connections must not pass a new disconnected invocation'
 state['welcome'] = True
 service.restart(); wait(service.active)
-assert service.healthy(timeout=20)
+assert service.healthy(timeout=20), service_diagnostics()
 print('PASS Alpine installer: actual OpenRC start/restart, non-root metrics, root terminal, enrollment rollback, private identity and updater welcome health')
 
 m = load('manager', '/usr/local/libexec/blink-proxy/manager.py')
@@ -184,5 +206,72 @@ m.apply({**data, 'instances': []}, 3, time.time() + 90)
 assert not (m.UNITS / name).exists() and not Path('/etc/runlevels/default', name).exists()
 assert not (m.PRIVATE / 'transaction.json').exists()
 print('PASS Alpine musl cores: all three execute unprivileged; real OpenRC low-port proxy deployment, rollback and uninstall')
+testdir = Path('/var/tmp/anytls-web-test'); testdir.mkdir(mode=0o755)
+cert, key = testdir / 'site.crt', testdir / 'site.key'
+domain = 'any.example.test'
+def issue_certificate():
+    run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=' + domain, '-addext', 'subjectAltName=DNS:' + domain])
+    for path in (cert, key):
+        path.chmod(0o640); os.chown(path, 0, pwd.getpwnam('blink-proxy').pw_gid)
+issue_certificate()
+os.environ['SSL_CERT_FILE'] = str(cert)
+anytls = copy.deepcopy(item)
+anytls.update(id=str(uuid.uuid4()), kind='anytls', domain=domain, port=443, fallbackPort=8010)
+desired = {**data, 'instances': [anytls], 'email': 'test@example.test'}
+real_web_config = m.caddy_config
+def local_web_config(payload):
+    config = real_web_config(payload)
+    if config:
+        config['apps']['tls'] = {'certificates': {'load_files': [{'certificate': str(cert), 'key': str(key)}]}}
+        for value in config['apps']['http']['servers'].values():
+            value['automatic_https'] = {'disable': True}
+    return config
+def website():
+    return run(['curl', '-fsS', '--max-time', '10', '--noproxy', '*', '--cacert', str(cert), '--resolve', domain + ':443:127.0.0.1', 'https://' + domain + '/'])
+with patch.object(m, 'check_dns'), patch.object(m, 'certificate_source', return_value=(cert, key)), patch.object(m, 'caddy_config', side_effect=local_web_config):
+    result = m.apply(desired, 4, time.time() + 90)
+    assert result['status']['instances'][0]['state'] == 'active'
+    assert 'Welcome.' in website()
+    client_file = testdir / 'client.json'
+    client_config = {'inbounds': [{'type': 'mixed', 'listen': '127.0.0.1', 'listen_port': 18090}],
+                     'outbounds': [{'type': 'anytls', 'server': '127.0.0.1', 'server_port': 443, 'password': anytls['credentials']['password'],
+                                   'tls': {'enabled': True, 'server_name': domain, 'alpn': ['h2', 'http/1.1']}}]}
+    for valid in (True, False):
+        if not valid:
+            client_config['outbounds'][0]['password'] = 'wrong-password'
+        client_file.write_text(json.dumps(client_config)); client_file.chmod(0o600)
+        with (testdir / 'client.log').open('wb') as log:
+            client = subprocess.Popen([str(m.binary('sing-box')), 'run', '-c', str(client_file)], stdout=log, stderr=log)
+            try:
+                def listening():
+                    try:
+                        with socket.create_connection(('127.0.0.1', 18090), timeout=0.2): return True
+                    except OSError: return False
+                wait(listening)
+                response = subprocess.run(['curl', '-fsS', '--max-time', '5', '--noproxy', '', '--socks5-hostname', '127.0.0.1:18090', origin + '/downloads/agent/latest.json'], capture_output=True, text=True, timeout=8)
+                if valid:
+                    assert response.returncode == 0 and json.loads(response.stdout)['schema'] == 1, response.stderr
+                else:
+                    assert response.returncode != 0, 'Invalid AnyTLS credentials must not open a proxy'
+            finally:
+                client.terminate(); client.wait(timeout=10)
+    before_pem = (m.ROOT / 'certificates' / domain / 'combined.pem').read_bytes()
+    issue_certificate(); m.sync_certificates(desired)
+    assert before_pem != (m.ROOT / 'certificates' / domain / 'combined.pem').read_bytes()
+    assert 'Welcome.' in website(), 'Renewed certificate must be served by the TLS frontend'
+    occupied = socket.socket(); occupied.bind(('0.0.0.0', 18443)); occupied.listen()
+    failed = copy.deepcopy(desired); failed['instances'][0]['port'] = 18443
+    try:
+        m.apply(failed, 5, time.time() + 90)
+        raise AssertionError('Occupied AnyTLS public port must roll back')
+    except m.DeploymentError:
+        pass
+    finally:
+        occupied.close()
+    assert m.read_json(m.PRIVATE / 'applied.json')['version'] == 4
+    assert 'Welcome.' in website()
+    m.apply({**desired, 'instances': []}, 6, time.time() + 90)
+    assert not any((m.UNITS / name).exists() for name in (m.service_name(anytls), m.WEB_SERVICE, m.TLS_SERVICE))
+print('PASS Alpine AnyTLS: public 443 website, authenticated proxy, invalid-password rejection, certificate renewal, rollback and full service cleanup')
 run(['rc-service', 'blink-agent', 'stop']); run(['rc-service', 'blink-proxy-manager', 'stop'])
 server.shutdown()

@@ -36,6 +36,20 @@ test("SS2022 exits terminate chains rather than introduce recursion", () => {
   assert(instanceInput.safeParse(ss).success);
   assert(!instanceInput.safeParse({ ...ss, defaultOutbound: serverId }).success);
 });
+test("AnyTLS supports a default website or a validated HTTPS fallback upstream", () => {
+  const input = { ...base, kind: "anytls", upstream: "" };
+  assert(instanceInput.safeParse(input).success);
+  assert(instanceInput.safeParse({ ...input, upstream: "https://www.example.com" }).success);
+  for (const upstream of [
+    "http://www.example.com",
+    "https://user:pass@example.com",
+    "https://example.com/path",
+    "https://127.0.0.1",
+    "https://example.com?x=1",
+  ])
+    assert(!instanceInput.safeParse({ ...input, upstream }).success);
+  assert(!instanceInput.safeParse({ ...input, fallbackPort: 443 }).success);
+});
 test("rules validate CIDR/domain syntax and retain priority", () => {
   const rules = [
     { match: "domain", values: ["first.example.com"], outbound: serverId },

@@ -1,5 +1,5 @@
 FROM debian:bookworm-slim AS dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 python3-yaml iputils-ping procps systemd openssl \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 python3-yaml iputils-ping procps systemd openssl haproxy \
     && rm -rf /var/lib/apt/lists/*
 
 FROM dependencies AS base
@@ -15,7 +15,7 @@ COPY deploy/agent/proxy-manager.py deploy/agent/proxy-assets.json deploy/agent/t
 CMD ["python3", "/proxy/test-proxy.py", "--integration"]
 
 FROM alpine:3.23 AS alpine-installer-test
-RUN apk add --no-cache bash curl ca-certificates python3 py3-yaml coreutils tar iproute2 openssl openrc busybox-openrc
+RUN apk add --no-cache bash curl ca-certificates python3 py3-yaml coreutils tar iproute2 openssl openrc busybox-openrc haproxy
 COPY web/public/downloads /releases/downloads
 COPY deploy/agent/test-alpine.py /test.py
 COPY deploy/agent/test-proxy.py /test-proxy.py

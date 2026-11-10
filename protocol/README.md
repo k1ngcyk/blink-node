@@ -81,3 +81,5 @@ not globally atomic: failures are visible and a new apply reconciles desired con
 Proxy operations and credential access require owner authorization and recent elevation.
 
 The same protocol runs on systemd and Alpine/OpenRC. OpenRC supervises the Agent and root manager independently; managed cores run as `blink-proxy` with the low-port binding capability. OpenRC updates run through crond and require a stable supervised child plus a fresh Master welcome before accepting a binary replacement.
+
+AnyTLS shares its public TLS port with a website fallback. A managed HAProxy frontend checks the initial 32-byte authentication digest after TLS termination and routes matching streams to the loopback sing-box listener (`fallbackPort`); other streams go to Caddy over a local Unix socket. sing-box independently validates AnyTLS authentication and retains outbound routing. `upstream` is optional for AnyTLS: an empty value serves a built-in page; a validated HTTPS origin enables reverse proxying. Frontend configuration, private certificates, service status, renewal, and rollback are managed with the same generation transaction as the cores.
