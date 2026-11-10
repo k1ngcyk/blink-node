@@ -3,10 +3,28 @@ import { z } from "zod";
 import { isPublicAddress } from "./network";
 import type { ProxySpec } from "./proxy-model";
 
+const displayName = z
+  .string()
+  .trim()
+  .max(100)
+  .transform((value) => value || null)
+  .nullable();
+
 export const subscriptionInput = z
   .object({
     name: z.string().trim().min(1).max(100),
+    displayName: displayName.optional(),
+    nodeDisplayNames: z
+      .record(z.uuid(), displayName)
+      .refine((value) => Object.keys(value).length <= 1000, "最多设置 1000 个节点名称")
+      .optional(),
     enabled: z.boolean().default(true),
+    // Required on creation; omitted on update preserves the current password.
+    encryptionPassword: z
+      .string()
+      .min(16, "加密密码至少需要 16 个字符，建议使用随机生成")
+      .max(128, "加密密码不能超过 128 个字符")
+      .refine((value) => value.trim().length > 0, "加密密码不能全为空白"),
     nodeIds: z
       .array(z.uuid())
       .min(1)
@@ -63,11 +81,15 @@ const realityCredentials = z.object({
 const anytlsCredentials = z.object({ password: z.string().min(1).max(4096) });
 
 // Serialize only client fields: never include the REALITY private key or server routing rules.
-export function subscriptionUri(node: SubscriptionInstance, credentials: unknown) {
+export function subscriptionUri(
+  node: SubscriptionInstance,
+  credentials: unknown,
+  displayName?: string | null,
+) {
   if (subscriptionReason(node)) return null;
   const address = subscriptionAddress(node.addresses)!;
   const endpoint = `${isIP(address) === 6 ? `[${address}]` : address}:${node.spec.port}`;
-  const label = encodeURIComponent(`${node.server_name} · ${node.name}`);
+  const label = encodeURIComponent(displayName || `${node.server_name} · ${node.name}`);
   if (node.kind === "reality") {
     const parsed = realityCredentials.safeParse(credentials);
     if (!parsed.success) return null;

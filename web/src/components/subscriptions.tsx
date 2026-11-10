@@ -1,23 +1,34 @@
 "use client";
 import Link from "next/link";
 import { useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { IconCheck, IconCopy, IconPlus, IconSearch } from "@tabler/icons-react";
 import { api, useResource } from "@/lib/client";
 import {
   subscriptionProtocols,
+  shadowrocketSubscriptionUri,
   type ProxySubscription,
   type SubscriptionData,
+  type SubscriptionAccess,
 } from "@/lib/subscriptions";
 import { when } from "@/lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./ui/dialog";
 import { Empty, ErrorBanner, Loading } from "./common";
 import { MoreActions } from "./more-actions";
 
 const endpoint = "proxy/subscriptions";
-type Draft = { name: string; enabled: boolean; nodeIds: string[] };
-type Shared = { id: string; name: string; url: string };
+type Draft = {
+  name: string;
+  displayName: string;
+  nodeDisplayNames: Record<string, string>;
+  enabled: boolean;
+  nodeIds: string[];
+  encryptionPassword?: string;
+};
+type Shared = SubscriptionAccess & { id: string; name: string };
 
 function SubscriptionEditor({
   value,
@@ -31,7 +42,19 @@ function SubscriptionEditor({
   onClose: () => void;
 }) {
   const [name, setName] = useState(value === "new" ? "" : value.name);
+  const [displayName, setDisplayName] = useState(value === "new" ? "" : (value.displayName ?? ""));
+  const [nodeDisplayNames, setNodeDisplayNames] = useState<Record<string, string>>(
+    value === "new"
+      ? {}
+      : Object.fromEntries(
+          value.nodes.flatMap((node) =>
+            node.instanceId ? [[node.instanceId, node.displayName ?? ""]] : [],
+          ),
+        ),
+  );
   const [enabled, setEnabled] = useState(value === "new" ? true : value.enabled);
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [selected, setSelected] = useState<string[]>(
     value === "new"
       ? []
@@ -41,7 +64,7 @@ function SubscriptionEditor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const filtered = nodes.filter((node) =>
-    `${node.name} ${node.serverName} ${node.address ?? ""} ${node.kind ? subscriptionProtocols[node.kind] : ""}`
+    `${node.name} ${nodeDisplayNames[node.instanceId] ?? ""} ${node.serverName} ${node.address ?? ""} ${node.kind ? subscriptionProtocols[node.kind] : ""}`
       .toLowerCase()
       .includes(search.toLowerCase()),
   );
@@ -71,7 +94,16 @@ function SubscriptionEditor({
             setBusy(true);
             setError("");
             try {
-              await onSave({ name: name.trim(), enabled, nodeIds: selected });
+              await onSave({
+                name: name.trim(),
+                displayName: displayName.trim(),
+                nodeDisplayNames: Object.fromEntries(
+                  selected.map((id) => [id, (nodeDisplayNames[id] ?? "").trim()]),
+                ),
+                enabled,
+                nodeIds: selected,
+                encryptionPassword: password || undefined,
+              });
             } catch (error) {
               setError((error as Error).message);
             } finally {
@@ -79,18 +111,33 @@ function SubscriptionEditor({
             }
           }}
         >
-          <label className="field">
-            订阅名称
-            <Input
-              autoFocus
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="例如：日常使用"
-              required
-              maxLength={100}
-              disabled={busy}
-            />
-          </label>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="field">
+              订阅名称
+              <Input
+                autoFocus
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="例如：日常使用"
+                required
+                maxLength={100}
+                disabled={busy}
+              />
+            </label>
+            <label className="field">
+              Shadowrocket 订阅名称
+              <Input
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder={name.trim() || "留空使用订阅名称"}
+                maxLength={100}
+                disabled={busy}
+              />
+            </label>
+          </div>
+          <p className="text-xs muted">
+            客户端名称用于二维码和订阅标题，留空使用订阅名称。已有订阅可重新扫码同步名称。
+          </p>
           <label className="row">
             <input
               type="checkbox"
@@ -100,10 +147,60 @@ function SubscriptionEditor({
             />
             启用订阅
           </label>
+          <fieldset disabled={busy} className="min-w-0 space-y-3">
+            <legend className="mb-3 text-sm font-medium">订阅加密 · 必需</legend>
+            <label className="field">
+              加密密码
+              <Input
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={value !== "new" ? "留空保留现有密码" : "16–128 个字符，建议随机生成"}
+                autoComplete="new-password"
+                spellCheck={false}
+                required={value === "new"}
+                minLength={16}
+                maxLength={128}
+              />
+            </label>
+            <div className="row">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setPassword(
+                    Array.from(crypto.getRandomValues(new Uint8Array(24)), (byte) =>
+                      byte.toString(16).padStart(2, "0"),
+                    ).join(""),
+                  );
+                  setShowPassword(true);
+                }}
+              >
+                生成随机密码
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                aria-pressed={showPassword}
+                onClick={() => setShowPassword(!showPassword)}
+              >
+                {showPassword ? "隐藏密码" : "显示密码"}
+              </Button>
+            </div>
+            <p className="text-xs muted">
+              所有订阅均加密。保存后可用 Shadowrocket 扫码导入，或手动填写 Subscribe → Password。
+              {value !== "new" && "更换密码后，请重新扫码或更新客户端的 Password。"}
+            </p>
+          </fieldset>
           <fieldset disabled={busy} className="min-w-0">
             <legend className="mb-3 text-sm font-medium">
               入口节点 · 已选 {selected.length} 个
             </legend>
+            <p className="text-xs muted mb-3">
+              勾选节点后可设置客户端显示名称；留空使用「服务器 · 节点」名称。
+            </p>
             <div className="row between mb-3">
               <div className="search">
                 <IconSearch size={16} />
@@ -139,40 +236,56 @@ function SubscriptionEditor({
             </div>
             <div className="max-h-[38dvh] overflow-auto rounded-md border divide-y">
               {filtered.map((node) => (
-                <label
-                  key={node.instanceId}
-                  className="flex items-start gap-3 p-3 cursor-pointer hover:bg-accent/30"
-                >
-                  <input
-                    className="mt-1"
-                    type="checkbox"
-                    checked={selected.includes(node.instanceId)}
-                    disabled={!!node.reason && !selected.includes(node.instanceId)}
-                    onChange={(e) =>
-                      setSelected((current) =>
-                        e.target.checked
-                          ? [...current, node.instanceId]
-                          : current.filter((id) => id !== node.instanceId),
-                      )
-                    }
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block break-words">
-                      {node.name} <span className="muted font-normal">· {node.serverName}</span>
-                    </span>
-                    <span className="block text-xs muted font-normal break-all mt-1">
-                      {node.kind && subscriptionProtocols[node.kind]} ·{" "}
-                      {node.address
-                        ? `${node.address.includes(":") ? `[${node.address}]` : node.address}:${node.port}`
-                        : "缺少公网 IP"}
-                    </span>
-                    {node.reason && (
-                      <span className="block text-xs warning font-normal mt-1">
-                        {node.reason} · 暂停输出
+                <div key={node.instanceId} className="p-3 space-y-3 hover:bg-accent/30">
+                  <label className="flex items-start gap-3 cursor-pointer">
+                    <input
+                      className="mt-1"
+                      type="checkbox"
+                      checked={selected.includes(node.instanceId)}
+                      disabled={!!node.reason && !selected.includes(node.instanceId)}
+                      onChange={(e) =>
+                        setSelected((current) =>
+                          e.target.checked
+                            ? [...current, node.instanceId]
+                            : current.filter((id) => id !== node.instanceId),
+                        )
+                      }
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block break-words">
+                        {node.name} <span className="muted font-normal">· {node.serverName}</span>
                       </span>
-                    )}
-                  </span>
-                </label>
+                      <span className="block text-xs muted font-normal break-all mt-1">
+                        {node.kind && subscriptionProtocols[node.kind]} ·{" "}
+                        {node.address
+                          ? `${node.address.includes(":") ? `[${node.address}]` : node.address}:${node.port}`
+                          : "缺少公网 IP"}
+                      </span>
+                      {node.reason && (
+                        <span className="block text-xs warning font-normal mt-1">
+                          {node.reason} · 暂停输出
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                  {selected.includes(node.instanceId) && (
+                    <label className="field ml-6">
+                      <span className="text-xs muted">客户端显示名称</span>
+                      <Input
+                        aria-label={`${node.name} 的客户端显示名称`}
+                        placeholder={`${node.serverName} · ${node.name}`}
+                        value={nodeDisplayNames[node.instanceId] ?? ""}
+                        onChange={(e) =>
+                          setNodeDisplayNames((current) => ({
+                            ...current,
+                            [node.instanceId]: e.target.value,
+                          }))
+                        }
+                        maxLength={100}
+                      />
+                    </label>
+                  )}
+                </div>
               ))}
               {!filtered.length && (
                 <p className="p-5 muted text-sm">
@@ -193,7 +306,8 @@ function SubscriptionEditor({
           </fieldset>
           {!!deleted.length && (
             <p className="text-sm warning">
-              {deleted.map((node) => node.name).join("、")} 已删除，保存后从订阅中移除。
+              {deleted.map((node) => node.displayName || node.name).join("、")}{" "}
+              已删除，保存后从订阅中移除。
             </p>
           )}
           <p className="text-xs muted">
@@ -205,7 +319,10 @@ function SubscriptionEditor({
             <Button variant="outline" type="button" disabled={busy} onClick={onClose}>
               取消
             </Button>
-            <Button type="submit" disabled={busy || !name.trim() || !selected.length}>
+            <Button
+              type="submit"
+              disabled={busy || !name.trim() || !selected.length || (value === "new" && !password)}
+            >
               {busy ? "正在保存…" : value === "new" ? "创建订阅" : "保存修改"}
             </Button>
           </div>
@@ -229,13 +346,17 @@ export function Subscriptions() {
   const [confirmError, setConfirmError] = useState("");
   const [copyError, setCopyError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [passwordCopied, setPasswordCopied] = useState(false);
+  const [showSharedPassword, setShowSharedPassword] = useState(false);
   const [message, setMessage] = useState("");
   const subscriptions = resource.data?.subscriptions ?? [];
   const filtered = subscriptions.filter((item) =>
-    item.name.toLowerCase().includes(search.toLowerCase()),
+    `${item.name} ${item.displayName ?? ""}`.toLowerCase().includes(search.toLowerCase()),
   );
   function showLink(value: Shared) {
     setCopied(false);
+    setPasswordCopied(false);
+    setShowSharedPassword(false);
     setCopyError("");
     setShared(value);
   }
@@ -257,7 +378,7 @@ export function Subscriptions() {
       <div className="page-head">
         <div>
           <h1>代理订阅</h1>
-          <p>把入口节点整理成订阅，在 Shadowrocket 等客户端中导入和更新。</p>
+          <p>把入口节点整理成加密订阅，在 Shadowrocket 中扫码导入和更新。</p>
         </div>
         <Button
           disabled={resource.loading || !resource.data || busy}
@@ -281,7 +402,7 @@ export function Subscriptions() {
             <h2>
               订阅 <span className="muted text-xs ml-2 font-normal">{subscriptions.length}</span>
             </h2>
-            <span className="muted text-xs">Shadowrocket · 通用链接格式</span>
+            <span className="muted text-xs">Shadowrocket · 强制加密</span>
           </div>
           {!!subscriptions.length && (
             <div className="toolbar">
@@ -336,7 +457,13 @@ export function Subscriptions() {
                         <span className={`status ${item.enabled ? "online" : "revoked"}`}>
                           {item.enabled ? "已启用" : "已停用"}
                         </span>
+                        {item.encrypted && <span className="status">已加密</span>}
                       </div>
+                      {item.displayName && (
+                        <p className="text-xs muted mt-2 break-words">
+                          客户端名称：{item.displayName}
+                        </p>
+                      )}
                       <p className="text-xs muted mt-2">
                         {available} / {item.nodes.length} 个入口可输出 · 更新于{" "}
                         {when(item.updatedAt)}
@@ -351,7 +478,7 @@ export function Subscriptions() {
                               .filter((node) => node.reason)
                               .map((node, index) => (
                                 <li key={node.instanceId ?? `deleted-${index}`}>
-                                  {node.name}：{node.reason}
+                                  {node.displayName || node.name}：{node.reason}
                                 </li>
                               ))}
                           </ul>
@@ -365,12 +492,12 @@ export function Subscriptions() {
                         disabled={busy}
                         onClick={() =>
                           void act(async () => {
-                            const result = await api<{ url: string }>(
+                            const result = await api<SubscriptionAccess>(
                               `${endpoint}/${item.id}/link`,
                               "POST",
                               {},
                             );
-                            showLink({ id: item.id, name: item.name, url: result.url });
+                            showLink({ id: item.id, name: item.name, ...result });
                           })
                         }
                       >
@@ -431,13 +558,22 @@ export function Subscriptions() {
           onClose={() => setEditing(null)}
           onSave={async (draft) => {
             if (editing === "new") {
-              const created = await api<{ id: string; url: string }>(endpoint, "POST", draft);
+              const created = await api<SubscriptionAccess & { id: string }>(
+                endpoint,
+                "POST",
+                draft,
+              );
               setEditing(null);
               showLink({ ...created, name: draft.name });
             } else {
               await api(`${endpoint}/${editing.id}`, "PATCH", draft);
               setEditing(null);
-              setMessage(`「${draft.name}」已保存，客户端更新订阅后生效`);
+              setMessage(
+                draft.encryptionPassword ||
+                  (draft.displayName || draft.name) !== (editing.displayName || editing.name)
+                  ? `「${draft.name}」已保存，请重新扫码同步订阅名称与密码`
+                  : `「${draft.name}」已保存，客户端更新订阅后生效`,
+              );
             }
             resource.refresh();
           }}
@@ -453,38 +589,115 @@ export function Subscriptions() {
           <DialogHeader>
             <DialogTitle>订阅链接</DialogTitle>
             <DialogDescription>
-              {shared?.name} · 在 Shadowrocket 中添加「Subscribe」类型，并粘贴下方 URL。
+              {shared?.displayName} · 用 Shadowrocket 扫码导入，或手动填写名称、URL 和密码。
             </DialogDescription>
           </DialogHeader>
-          <label className="field">
-            订阅 URL
-            <Input
-              aria-label="订阅 URL"
-              className="mono text-xs"
-              value={shared?.url ?? ""}
-              readOnly
-              onFocus={(e) => e.target.select()}
-            />
-          </label>
-          <p className="muted text-xs">
-            此链接包含节点访问凭证，请仅保存在自己的客户端。节点选择或配置变化后，更新同一订阅即可。
-          </p>
-          <ErrorBanner error={copyError} />
-          <Button
-            onClick={async () => {
-              if (!shared) return;
-              try {
-                await navigator.clipboard.writeText(shared.url);
-                setCopied(true);
-                setCopyError("");
-              } catch {
-                setCopyError("无法访问剪贴板，请手动选择并复制上方链接");
-              }
-            }}
-          >
-            {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
-            {copied ? "已复制订阅链接" : "复制订阅链接"}
-          </Button>
+          <Tabs defaultValue="qr">
+            <TabsList className="w-full">
+              <TabsTrigger value="qr">扫码导入</TabsTrigger>
+              <TabsTrigger value="manual">手动复制</TabsTrigger>
+            </TabsList>
+            <TabsContent value="qr" className="space-y-3 pt-3">
+              {shared && (
+                <QRCodeSVG
+                  value={shadowrocketSubscriptionUri(shared)}
+                  size={288}
+                  level="L"
+                  boostLevel
+                  marginSize={4}
+                  bgColor="#ffffff"
+                  fgColor="#000000"
+                  className="mx-auto max-w-full h-auto rounded-md"
+                  role="img"
+                  aria-label="Shadowrocket 订阅二维码"
+                  title="Shadowrocket 订阅二维码"
+                />
+              )}
+              <p className="text-sm text-center">打开 Shadowrocket，点击首页扫一扫。</p>
+              <p className="text-xs muted text-center">
+                二维码包含订阅链接和解密密码，仅在本地生成，请勿分享截图。
+              </p>
+            </TabsContent>
+            <TabsContent value="manual" className="space-y-4 pt-3">
+              <label className="field">
+                订阅名称（Alias）
+                <Input
+                  value={shared?.displayName ?? ""}
+                  readOnly
+                  onFocus={(e) => e.target.select()}
+                />
+              </label>
+              <label className="field">
+                订阅 URL
+                <Input
+                  aria-label="订阅 URL"
+                  className="mono text-xs"
+                  value={shared?.url ?? ""}
+                  readOnly
+                  onFocus={(e) => e.target.select()}
+                />
+              </label>
+              <p className="muted text-xs">
+                将下方密码填入 Subscribe → Password。链接和密码请分别保管。
+              </p>
+              <ErrorBanner error={copyError} />
+              <Button
+                className="w-full"
+                onClick={async () => {
+                  if (!shared) return;
+                  try {
+                    await navigator.clipboard.writeText(shared.url);
+                    setCopied(true);
+                    setCopyError("");
+                  } catch {
+                    setCopyError("无法访问剪贴板，请手动选择并复制上方链接");
+                  }
+                }}
+              >
+                {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
+                {copied ? "已复制订阅链接" : "复制订阅链接"}
+              </Button>
+              {shared?.encryptionPassword && (
+                <>
+                  <label className="field">
+                    订阅加密密码
+                    <Input
+                      type={showSharedPassword ? "text" : "password"}
+                      className="mono text-xs"
+                      value={shared.encryptionPassword}
+                      readOnly
+                      autoComplete="off"
+                      onFocus={(e) => e.target.select()}
+                    />
+                  </label>
+                  <div className="row">
+                    <Button
+                      variant="outline"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(shared.encryptionPassword);
+                          setPasswordCopied(true);
+                          setCopyError("");
+                        } catch {
+                          setCopyError("无法访问剪贴板，请显示密码后手动选择并复制");
+                        }
+                      }}
+                    >
+                      {passwordCopied ? <IconCheck size={16} /> : <IconCopy size={16} />}
+                      {passwordCopied ? "已复制密码" : "复制密码"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      aria-pressed={showSharedPassword}
+                      onClick={() => setShowSharedPassword(!showSharedPassword)}
+                    >
+                      {showSharedPassword ? "隐藏密码" : "显示密码"}
+                    </Button>
+                  </div>
+                </>
+              )}
+            </TabsContent>
+          </Tabs>
         </DialogContent>
       </Dialog>
       <Dialog
@@ -522,12 +735,12 @@ export function Subscriptions() {
                     await api(`${endpoint}/${item.id}`, "DELETE");
                     setMessage(`「${item.name}」已删除`);
                   } else {
-                    const result = await api<{ url: string }>(
+                    const result = await api<SubscriptionAccess>(
                       `${endpoint}/${item.id}/rotate`,
                       "POST",
                       {},
                     );
-                    showLink({ id: item.id, name: item.name, url: result.url });
+                    showLink({ id: item.id, name: item.name, ...result });
                   }
                   setConfirmation(null);
                   resource.refresh();

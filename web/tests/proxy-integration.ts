@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
 
 const exec = promisify(execFile);
 const name = `blink-proxy-db-${randomBytes(5).toString("hex")}`;
@@ -42,8 +41,8 @@ try {
       await new Promise((r) => setTimeout(r, 200));
     }
   }
-  for (const file of (await readdir("drizzle")).filter((f) => f.endsWith(".sql")).sort())
-    await sql.unsafe(await readFile(`drizzle/${file}`, "utf8"));
+  const { migrateDatabase } = await import("../src/db/migrate");
+  await migrateDatabase();
   const { proxyApi, initialProxyScan, dispatchProxy, receiveProxyResult, receiveProxyStatus } =
     await import("../src/server/proxy");
   const { decrypt } = await import("../src/server/crypto");

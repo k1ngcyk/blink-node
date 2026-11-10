@@ -1,6 +1,7 @@
 export type SubscriptionNode = {
   instanceId: string | null;
   name: string;
+  displayName: string | null;
   serverName: string;
   kind: "reality" | "anytls" | null;
   address: string | null;
@@ -10,7 +11,9 @@ export type SubscriptionNode = {
 export type ProxySubscription = {
   id: string;
   name: string;
+  displayName: string | null;
   enabled: boolean;
+  encrypted: boolean;
   createdAt: string;
   updatedAt: string;
   nodes: SubscriptionNode[];
@@ -19,4 +22,13 @@ export type SubscriptionData = {
   subscriptions: ProxySubscription[];
   nodes: (SubscriptionNode & { instanceId: string })[];
 };
+export type SubscriptionAccess = { url: string; encryptionPassword: string; displayName: string };
+
+// Shadowrocket's native subscription share format, including its local decryption password.
+export function shadowrocketSubscriptionUri(access: SubscriptionAccess) {
+  const encoded = btoa(
+    Array.from(new TextEncoder().encode(access.url), (byte) => String.fromCharCode(byte)).join(""),
+  );
+  return `sub://${encoded}?password=${encodeURIComponent(access.encryptionPassword)}#${encodeURIComponent(access.displayName)}`;
+}
 export const subscriptionProtocols = { reality: "VLESS · REALITY", anytls: "AnyTLS" };

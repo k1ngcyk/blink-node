@@ -62,7 +62,7 @@ export function protectedActionLabel(path: string, method: string) {
   if (path.endsWith("/enrollment")) return "重新生成接入凭证";
   if (path.endsWith("/revoke")) return "吊销服务器凭证";
   if (path === "auth/revoke-sessions") return "退出其他设备";
-  if (path.endsWith("/link")) return "查看订阅链接";
+  if (path.endsWith("/link")) return "查看订阅链接与密码";
   if (path.endsWith("/rotate")) return "重置订阅链接";
   if (path.includes("subscriptions")) return method === "DELETE" ? "删除订阅" : "保存订阅";
   if (path.startsWith("proxy/settings")) return "更新 DNS 与证书设置";

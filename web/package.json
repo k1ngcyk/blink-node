@@ -32,6 +32,7 @@
     "ipaddr.js": "latest",
     "next": "latest",
     "postgres": "latest",
+    "qrcode.react": "^4.2.0",
     "radix-ui": "^1.8.1",
     "react": "latest",
     "react-dom": "latest",
@@ -59,6 +60,7 @@
     "drizzle-kit": "^0.31.11",
     "eslint": "latest",
     "eslint-config-next": "latest",
+    "jsqr": "^1.4.0",
     "prettier": "^3.9.10",
     "tailwindcss": "latest",
     "typescript": "latest"
