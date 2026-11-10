@@ -364,7 +364,7 @@ GitHub 镜像：`git@github.com:k1ngcyk/blink-node.git`。
 构建 runner 需要 Docker、Buildx、Python 3 和访问镜像仓库的权限，不需要预装 Node 或 Rust。
 构建使用该项目独立且持久的 BuildKit builder；缺少 ARM64 支持时会注册 QEMU binfmt。
 Rust 编译器始终原生运行，通过 Zig 交叉编译生成两种架构的 musl 二进制，避免在 QEMU 中编译 Rust；
-QEMU 用于目标架构镜像步骤；在 AMD64 runner 上构建 ARM64 Web 镜像仍有仿真开销。Cargo 编译产物按架构缓存，新提交会取消过时的构建。
+Web 的依赖安装和 Next.js 编译固定在构建机原生架构执行；编译产物由两种运行镜像共享，生产依赖按目标 CPU 选择 sharp / SWC / esbuild 的预编译包，避免混入构建机架构的原生模块。QEMU 仅用于异构运行镜像安装 Debian 系统包（CA 证书、ping），不参与 Rust / Node / Next.js 编译。Cargo 编译产物按架构缓存，新提交会取消过时的构建。
 构建和生产部署各自通过 `resource_group` 串行执行；部署前验证提交仍是 `main` 最新提交，跳过过时流水线。
 生产部署不可被新提交自动取消，防止服务切换途中中断。镜像回滚不撤销已成功的数据库迁移，迁移须保持前向兼容。
 GitLab 产物只保存安装包与镜像发布元数据。
